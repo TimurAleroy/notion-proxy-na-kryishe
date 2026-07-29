@@ -1,0 +1,1536 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>На Крыше</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Jost:wght@300;400;500;600&family=Inter:wght@300;400;500&display=swap');
+
+    :root {
+      --bg: #140B00;
+      --bg-card: #241005;
+      --bg-card-hover: #2E140A;
+      --accent: #B87333;
+      --accent-dim: rgba(184, 115, 51, 0.14);
+      --text: #F0DFC0;
+      --text-muted: #8A6A52;
+      --text-sub: #C9A880;
+      --border: rgba(240,223,192,0.08);
+      --radius: 18px;
+      --nav-h: 60px;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+    html, body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      min-height: 100vh;
+      overscroll-behavior: none;
+      padding-bottom: var(--nav-h);
+    }
+
+    /* HEADER */
+    .header {
+      padding: 24px 20px 18px;
+      border-bottom: 1px solid var(--border);
+    }
+    .header-top {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+    .logo {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      overflow: hidden;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: 1px solid rgba(184,115,51,0.3);
+    }
+    .logo img { width: 55%; height: 55%; object-fit: contain; }
+    .header-info h1 {
+      font-family: 'Jost', sans-serif;
+      font-size: 20px;
+      font-weight: 500;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+    }
+    .header-info p {
+      font-size: 11px;
+      color: var(--text-muted);
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      margin-top: 2px;
+    }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border);
+      border-radius: 100px;
+      padding: 7px 14px;
+      font-size: 12px;
+      color: var(--text-sub);
+    }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #4ade80; box-shadow: 0 0 6px #4ade80; flex-shrink: 0; }
+    .status-dot.closed { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
+
+    /* BOTTOM NAV */
+    .bottom-nav {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      height: var(--nav-h);
+      background: rgba(13,13,13,0.95);
+      backdrop-filter: blur(12px);
+      border-top: 1px solid var(--border);
+      display: flex;
+      z-index: 200;
+    }
+    .nav-tab {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      cursor: pointer;
+      background: none;
+      border: none;
+      font-family: 'Inter', sans-serif;
+      color: var(--text-muted);
+      font-size: 10px;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      transition: color 0.2s;
+      padding: 8px 4px;
+    }
+    .nav-tab.active { color: var(--accent); }
+    .nav-icon { display: flex; align-items: center; justify-content: center; }
+
+    /* SCREENS */
+    .screen { display: none; padding: 16px 16px 0; }
+    .screen.active { display: block; }
+
+    /* GRID */
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+    .grid-1 { margin-bottom: 10px; }
+
+    /* CARDS */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 16px;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.1s;
+      display: block;
+    }
+    .card:active { transform: scale(0.97); background: var(--bg-card-hover); }
+    .card-icon { margin-bottom: 12px; color: var(--text-sub); }
+    .card h3 { font-size: 16px; font-weight: 500; margin-bottom: 3px; line-height: 1.2; }
+    .card p { font-size: 10px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--text-muted); }
+    .card.accent { background: var(--accent-dim); border-color: rgba(184,115,51,0.2); }
+    .card-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      margin-top: 12px;
+      font-size: 10px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--text-sub);
+      border: 1px solid var(--border);
+      border-radius: 100px;
+      padding: 5px 11px;
+    }
+    .card.accent .card-pill {
+      color: var(--accent);
+      border-color: rgba(184,115,51,0.3);
+    }
+
+    /* SECTION TITLE */
+    .sec { font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: var(--text-muted); margin: 16px 0 10px; }
+
+    /* EVENTS */
+    .event-item {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .event-date { text-align: center; min-width: 40px; }
+    .event-date .day { font-family: 'Jost', sans-serif; font-size: 26px; font-weight: 600; color: var(--accent); line-height: 1; }
+    .event-date .mon { font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: var(--text-muted); }
+    .event-div { width: 1px; height: 32px; background: var(--border); flex-shrink: 0; }
+    .event-info h4 { font-size: 14px; font-weight: 500; margin-bottom: 2px; }
+    .event-info p { font-size: 11px; color: var(--text-muted); }
+    .event-tag { margin-left: auto; font-size: 10px; letter-spacing: 0.8px; text-transform: uppercase; color: var(--accent); background: var(--accent-dim); border: 1px solid rgba(184,115,51,0.2); border-radius: 100px; padding: 3px 9px; white-space: nowrap; }
+    .event-item-wrap { margin-bottom: 8px; }
+    .event-item-wrap .event-item { margin-bottom: 0; }
+    .event-detail {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-top: none;
+      border-radius: 0 0 14px 14px;
+      padding: 14px;
+      margin-top: -1px;
+    }
+
+    /* BOOKING FORM */
+    .form-group { margin-bottom: 14px; }
+    .form-label { font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px; display: block; }
+    .form-input {
+      width: 100%;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px 16px;
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      font-size: 15px;
+      outline: none;
+      transition: border-color 0.2s;
+      -webkit-appearance: none;
+    }
+    .form-input:focus { border-color: rgba(184,115,51,0.4); }
+    .form-input::placeholder { color: var(--text-muted); }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    select.form-input { cursor: pointer; }
+    textarea.form-input { resize: none; height: 90px; }
+    .btn-book {
+      width: 100%;
+      padding: 16px;
+      background: var(--accent-dim);
+      color: var(--accent);
+      border: 1px solid rgba(184,115,51,0.35);
+      border-radius: 14px;
+      font-family: 'Inter', sans-serif;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      cursor: pointer;
+      margin-top: 6px;
+      transition: background 0.2s, transform 0.1s;
+    }
+    .btn-book:active { transform: scale(0.98); background: rgba(184,115,51,0.2); }
+
+    /* ABOUT / INFO */
+    .about-hero {
+      background: var(--accent-dim);
+      border: 1px solid rgba(184,115,51,0.15);
+      border-radius: var(--radius);
+      padding: 28px 20px;
+      text-align: center;
+      margin-bottom: 12px;
+    }
+    .about-hero h2 {
+      font-family: 'Jost', sans-serif;
+      font-size: 26px;
+      font-weight: 300;
+      color: var(--accent);
+      letter-spacing: 5px;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .about-hero p { font-size: 13px; color: var(--text-sub); line-height: 1.6; }
+
+    /* FAQ */
+    .faq-item { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; margin-bottom: 8px; overflow: hidden; }
+    .faq-q {
+      padding: 15px 16px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+    .faq-ch { color: var(--text-muted); font-size: 18px; flex-shrink: 0; transition: transform 0.2s; }
+    .faq-a { display: none; padding: 0 16px 14px; font-size: 13px; color: var(--text-sub); line-height: 1.6; border-top: 1px solid var(--border); padding-top: 12px; }
+    .faq-item.open .faq-a { display: block; }
+    .faq-item.open .faq-ch { transform: rotate(180deg); }
+
+    /* MISC */
+    .loading { text-align: center; padding: 30px; color: var(--text-muted); font-size: 13px; }
+    .spinner { width: 22px; height: 22px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 10px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .no-data { text-align: center; padding: 30px 20px; color: var(--text-muted); font-size: 13px; line-height: 1.6; }
+    .footer { text-align: center; padding: 24px 20px 8px; color: var(--text-muted); font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; line-height: 2; }
+    .success-msg { background: var(--accent-dim); border: 1px solid rgba(184,115,51,0.3); border-radius: 12px; padding: 14px 16px; font-size: 13px; color: var(--accent); margin-bottom: 14px; display: none; align-items: center; gap: 10px; }
+
+    /* BOOKING OVERLAY */
+    .booking-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(13,13,13,0.55);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 600;
+      opacity: 0;
+      transition: opacity 0.25s ease;
+    }
+    .booking-overlay.show { display: flex; opacity: 1; }
+    .booking-overlay-card {
+      background: var(--bg-card);
+      border: 1px solid rgba(184,115,51,0.25);
+      border-radius: 22px;
+      padding: 40px 36px;
+      text-align: center;
+      max-width: 280px;
+      transform: scale(0.85);
+      opacity: 0;
+      transition: transform 0.35s cubic-bezier(0.34,1.56,0.64,1), opacity 0.3s ease;
+    }
+    .booking-overlay.show .booking-overlay-card {
+      transform: scale(1);
+      opacity: 1;
+    }
+    .booking-overlay-icon {
+      width: 60px;
+      height: 60px;
+      border-radius: 50%;
+      border: 1.5px solid rgba(184,115,51,0.4);
+      background: var(--accent-dim);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 20px;
+    }
+    .booking-overlay-icon svg {
+      stroke-dasharray: 24;
+      stroke-dashoffset: 24;
+      animation: drawCheck 0.5s ease 0.3s forwards;
+    }
+    @keyframes drawCheck {
+      to { stroke-dashoffset: 0; }
+    }
+    .booking-overlay-title {
+      font-family: 'Jost', sans-serif;
+      font-size: 17px;
+      font-weight: 500;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+    .booking-overlay-sub {
+      font-size: 10px;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+
+    /* HISTORY */
+    .history-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .history-count-badge {
+      font-size: 10px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--accent);
+      background: var(--accent-dim);
+      border: 1px solid rgba(184,115,51,0.25);
+      border-radius: 100px;
+      padding: 4px 12px;
+    }
+    .history-item {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px 14px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .history-item.cancelled { opacity: 0.55; }
+    .history-icon {
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.04);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .history-item.cancelled .history-icon { background: rgba(255,255,255,0.03); }
+    .history-text {
+      flex: 1;
+      font-size: 13px;
+      color: var(--text-sub);
+      line-height: 1.4;
+    }
+    .history-status {
+      font-size: 9px;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+    .history-cancel-btn {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      width: 28px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      flex-shrink: 0;
+      color: var(--text-muted);
+      transition: border-color 0.2s, color 0.2s;
+    }
+    .history-cancel-btn:active { border-color: rgba(184,115,51,0.4); color: var(--accent); }
+
+    /* CANCEL CONFIRM MODAL */
+    .confirm-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(13,13,13,0.6);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 600;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      padding: 20px;
+    }
+    .confirm-overlay.show { display: flex; opacity: 1; }
+    .confirm-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 28px 24px;
+      text-align: center;
+      max-width: 300px;
+      width: 100%;
+      transform: scale(0.9);
+      opacity: 0;
+      transition: transform 0.25s cubic-bezier(0.34,1.56,0.64,1), opacity 0.2s ease;
+    }
+    .confirm-overlay.show .confirm-card { transform: scale(1); opacity: 1; }
+    .confirm-title {
+      font-family: 'Jost', sans-serif;
+      font-size: 16px;
+      font-weight: 500;
+      letter-spacing: 1px;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+    .confirm-sub {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 22px;
+      line-height: 1.5;
+    }
+    .confirm-buttons { display: flex; gap: 10px; }
+    .confirm-btn {
+      flex: 1;
+      padding: 12px;
+      border-radius: 12px;
+      font-size: 12px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      cursor: pointer;
+      font-family: 'Inter', sans-serif;
+      border: 1px solid var(--border);
+      background: none;
+      color: var(--text-sub);
+    }
+    .confirm-btn.danger {
+      border-color: rgba(184,115,51,0.3);
+      background: var(--accent-dim);
+      color: var(--accent);
+    }
+
+    /* STORIES */
+    .stories-viewer {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: #140B00;
+      z-index: 500;
+      display: flex;
+      flex-direction: column;
+    }
+    .stories-slides {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+    .story-slide {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+    }
+    .story-slide.active { display: flex; }
+    .story-slide img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .story-placeholder {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      text-align: center;
+    }
+    .story-placeholder p {
+      font-family: 'Jost', sans-serif;
+      font-size: 24px;
+      font-weight: 300;
+      color: var(--text);
+      letter-spacing: 1px;
+    }
+    .story-placeholder span {
+      font-size: 11px;
+      color: var(--text-muted);
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+    }
+    .stories-progress {
+      display: flex;
+      gap: 4px;
+      padding: 14px 12px 8px;
+      position: relative;
+      z-index: 10;
+    }
+    .story-prog-bar {
+      flex: 1;
+      height: 2px;
+      background: rgba(255,255,255,0.25);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .story-prog-fill {
+      height: 100%;
+      background: #fff;
+      border-radius: 2px;
+      width: 0%;
+      transition: width 0.1s linear;
+    }
+    .story-prog-fill.done { width: 100%; }
+    .story-prog-fill.active-fill { width: 0%; animation: fillBar 5s linear forwards; }
+    @keyframes fillBar { from { width: 0% } to { width: 100% } }
+    .stories-label {
+      position: absolute;
+      top: 30px;
+      left: 16px;
+      font-size: 11px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.7);
+      z-index: 10;
+    }
+    .stories-close {
+      position: absolute;
+      top: 26px;
+      right: 14px;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.15);
+      border: none;
+      color: #fff;
+      font-size: 14px;
+      cursor: pointer;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .stories-book {
+      position: absolute;
+      bottom: 80px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(255,255,255,0.12);
+      border: 1px solid rgba(255,255,255,0.2);
+      color: #fff;
+      font-family: 'Inter', sans-serif;
+      font-size: 12px;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      padding: 10px 24px;
+      border-radius: 100px;
+      cursor: pointer;
+      z-index: 10;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="header">
+  <div class="header-top" style="background:var(--bg-card);border:1px solid var(--border);border-radius:16px;padding:10px 14px;">
+    <div class="logo"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAdUAAAW4CAYAAADnnFlgAAAzgElEQVR4nO3dP2+c97nv60cHpziHnGkHGHYSjkTsDbLY5ABiN9CwFMFpxUTdRoJtrnew30dkIGm9YrcSlFIK1CkHsoEDu3ECJJ0JqKXklqewneU4okSKX87z576ubmVhrTxwQn74zPzu+3fjf0ynDXA5/+//9+Ss7We4Dl+9+qb5X//zf99o+zmgr/6Pth8AAIZCVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUASBEVAEgRFQBIERUgX/6v9f+r7YfAXpNVOGS5ou9s7af4br8t//+/zTj8fpx288BfSWqcElHvz5s+xGu1YOHh79r+xmgr0QVLuHO5q2zndlW249xrY4eLtt+BOgtUYVLOHo47LfUpmma0WitOVjuD/YjbrhOogoXNN2YnN0/XLT9GCvxm0+O2n4E6CVRhQs6WO63/QgrM51Omt3ZtrdVuCRRhQsYj9ePq33X6G0VLk9U4QLmi73fjUZrbT/GSu3M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" alt="На Крыше"></div>
+    <div class="header-info">
+      <h1>На Крыше</h1>
+      <p>Владикавказ</p>
+    </div>
+    <div onclick="openProfile()" id="headerAvatar" style="margin-left:auto;width:44px;height:44px;border-radius:50%;background:#ff9f43;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;overflow:hidden;font-size:19px;color:#fff;font-weight:500;font-family:'Inter',sans-serif;">A</div>
+  </div>
+  <div style="display:flex;gap:20px;margin-bottom:18px;">
+    <div onclick="showScreen('vip')" style="display:flex;flex-direction:column;align-items:center;gap:8px;cursor:pointer;">
+      <div style="width:72px;height:72px;border-radius:50%;border:1px solid rgba(184,115,51,0.3);background:var(--accent-dim);overflow:hidden;display:flex;align-items:center;justify-content:center;" id="circleVip">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.2"><line x1="12" y1="2" x2="12" y2="11"/><polygon points="12 11 17.5 20 6.5 20"/></svg>
+      </div>
+      <span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--accent);">VIP</span>
+    </div>
+    <div onclick="showScreen('bar')" style="display:flex;flex-direction:column;align-items:center;gap:8px;cursor:pointer;">
+      <div style="width:72px;height:72px;border-radius:50%;border:1px solid var(--border);background:var(--bg-card);overflow:hidden;display:flex;align-items:center;justify-content:center;" id="circleBar">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--text-sub)" stroke-width="1.2"><path d="M5 4c0 5 3 8 7 8s7-3 7-8"/><line x1="5" y1="4" x2="19" y2="4"/><line x1="12" y1="12" x2="12" y2="19"/><line x1="8" y1="20" x2="16" y2="20"/></svg>
+      </div>
+      <span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-muted);">Бар</span>
+    </div>
+  </div>
+  <div class="status-badge">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">Сейчас открыто</span>
+    <span style="color:var(--text-muted);margin-left:4px">· 13:00 – 01:00</span>
+  </div>
+</div>
+
+<!-- SCREENS -->
+
+<!-- MENU -->
+<div class="screen" id="screen-menu">
+  <div style="margin-top:14px"></div>
+  <div class="about-hero">
+    <h2>Меню</h2>
+    <p>Скоро здесь появится наше меню<br>Кальян · Еда · Напитки</p>
+  </div>
+</div>
+
+<!-- BAR -->
+<div class="screen" id="screen-bar" style="padding:0;">
+  <div class="stories-viewer" id="barStories">
+    <div class="stories-progress" id="barProgress"></div>
+    <div class="stories-label">Бар</div>
+    <button class="stories-close" onclick="showScreen('home')">✕</button>
+    <div class="stories-slides" id="barSlides" ontouchstart="storyTouchStart(event,'bar')" ontouchend="storyTouchEnd(event,'bar')" onclick="storyClick(event,'bar')">
+      <div class="story-slide active" style="background:linear-gradient(160deg,#3f2410 0%,#140B00 100%)">
+        <div class="story-placeholder">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="rgba(184,115,51,0.5)" stroke-width="0.8"><path d="M5 4c0 5 3 8 7 8s7-3 7-8"/><line x1="5" y1="4" x2="19" y2="4"/><line x1="12" y1="12" x2="12" y2="19"/><line x1="8" y1="20" x2="16" y2="20"/></svg>
+          <p>Коктейль 1</p>
+          <span>Фото скоро</span>
+        </div>
+      </div>
+      <div class="story-slide" style="background:linear-gradient(160deg,#331c0a 0%,#140B00 100%)">
+        <div class="story-placeholder">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="rgba(184,115,51,0.5)" stroke-width="0.8"><path d="M5 4c0 5 3 8 7 8s7-3 7-8"/><line x1="5" y1="4" x2="19" y2="4"/><line x1="12" y1="12" x2="12" y2="19"/><line x1="8" y1="20" x2="16" y2="20"/></svg>
+          <p>Коктейль 2</p>
+          <span>Фото скоро</span>
+        </div>
+      </div>
+      <div class="story-slide" style="background:linear-gradient(160deg,#2e1608 0%,#140B00 100%)">
+        <div class="story-placeholder">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="rgba(184,115,51,0.5)" stroke-width="0.8"><path d="M5 4c0 5 3 8 7 8s7-3 7-8"/><line x1="5" y1="4" x2="19" y2="4"/><line x1="12" y1="12" x2="12" y2="19"/><line x1="8" y1="20" x2="16" y2="20"/></svg>
+          <p>Коктейль 3</p>
+          <span>Фото скоро</span>
+        </div>
+      </div>
+      <div class="story-slide" style="background:linear-gradient(160deg,#3d260e 0%,#140B00 100%)">
+        <div class="story-placeholder">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="rgba(184,115,51,0.5)" stroke-width="0.8"><path d="M5 4c0 5 3 8 7 8s7-3 7-8"/><line x1="5" y1="4" x2="19" y2="4"/><line x1="12" y1="12" x2="12" y2="19"/><line x1="8" y1="20" x2="16" y2="20"/></svg>
+          <p>Коктейль 4</p>
+          <span>Фото скоро</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- VIP -->
+<div class="screen" id="screen-vip" style="padding:0;">
+  <div class="stories-viewer" id="vipStories">
+    <div class="stories-progress" id="vipProgress"></div>
+    <div class="stories-label" style="color:var(--accent)">VIP-комнаты</div>
+    <button class="stories-close" onclick="showScreen('home')">✕</button>
+    <button class="stories-book" onclick="bookVipRoom()">Забронировать →</button>
+    <div class="stories-slides" id="vipSlides" ontouchstart="storyTouchStart(event,'vip')" ontouchend="storyTouchEnd(event,'vip')" onclick="storyClick(event,'vip')">
+      <div class="story-slide active" style="background:linear-gradient(160deg,#4a2e12 0%,#140B00 100%)">
+        <div class="story-placeholder">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="rgba(184,115,51,0.6)" stroke-width="0.8"><line x1="12" y1="1" x2="12" y2="11"/><polygon points="12 11 19 22 5 22"/></svg>
+          <p style="color:var(--accent)">VIP-комната 1</p>
+          <span>Фото скоро</span>
+        </div>
+      </div>
+      <div class="story-slide" style="background:linear-gradient(160deg,#553414 0%,#140B00 100%)">
+        <div class="story-placeholder">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="rgba(184,115,51,0.6)" stroke-width="0.8"><line x1="12" y1="1" x2="12" y2="11"/><polygon points="12 11 19 22 5 22"/></svg>
+          <p style="color:var(--accent)">VIP-комната 2</p>
+          <span>Фото скоро</span>
+        </div>
+      </div>
+      <div class="story-slide" style="background:linear-gradient(160deg,#3f2410 0%,#140B00 100%)">
+        <div class="story-placeholder">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="rgba(184,115,51,0.6)" stroke-width="0.8"><line x1="12" y1="1" x2="12" y2="11"/><polygon points="12 11 19 22 5 22"/></svg>
+          <p style="color:var(--accent)">VIP-комната 3</p>
+          <span>Фото скоро</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ADMIN -->
+<div class="screen" id="screen-admin">
+  <div class="sec" style="margin-top:14px">Активные брони</div>
+  <div id="adminBookingsList" class="no-data">Загружаю...</div>
+</div>
+
+<!-- PROFILE -->
+<div class="screen" id="screen-profile">
+  <div class="sec" style="margin-top:14px">Профиль</div>
+
+  <div style="display:flex;align-items:center;gap:14px;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:16px;">
+    <div id="profileAvatar" style="width:50px;height:50px;border-radius:50%;background:var(--accent-dim);border:1px solid rgba(184,115,51,0.3);display:flex;align-items:center;justify-content:center;font-size:18px;color:var(--accent);flex-shrink:0;overflow:hidden;">A</div>
+    <div>
+      <div id="profileName" style="font-size:15px;font-weight:500;">Гость</div>
+      <div id="profileUsername" style="font-size:12px;color:var(--text-muted);">@username</div>
+    </div>
+  </div>
+
+  <div class="form-group">
+    <label class="form-label">Имя</label>
+    <input class="form-input" id="pName" type="text" placeholder="Как к вам обращаться">
+  </div>
+
+  <div class="form-group">
+    <label class="form-label">Телефон</label>
+    <input class="form-input" id="pPhone" type="tel" value="+7">
+  </div>
+
+  <div class="form-row form-group">
+    <div>
+      <label class="form-label">День рождения</label>
+      <select class="form-input" id="pBirthDay">
+        <option value="">День</option>
+      </select>
+    </div>
+    <div>
+      <label class="form-label">&nbsp;</label>
+      <select class="form-input" id="pBirthMonth">
+        <option value="">Месяц</option>
+        <option value="01">Январь</option>
+        <option value="02">Февраль</option>
+        <option value="03">Март</option>
+        <option value="04">Апрель</option>
+        <option value="05">Май</option>
+        <option value="06">Июнь</option>
+        <option value="07">Июль</option>
+        <option value="08">Август</option>
+        <option value="09">Сентябрь</option>
+        <option value="10">Октябрь</option>
+        <option value="11">Ноябрь</option>
+        <option value="12">Декабрь</option>
+      </select>
+    </div>
+  </div>
+
+  <button class="btn-book" onclick="saveProfile()">Сохранить</button>
+  <div id="profileSaveMsg" style="display:none;background:var(--accent-dim);border:1px solid rgba(184,115,51,0.3);border-radius:12px;padding:12px 16px;font-size:13px;color:var(--accent);margin-top:12px;display:flex;align-items:center;gap:10px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" style="flex-shrink:0"><circle cx="12" cy="12" r="9"/><polyline points="8 12 11 15 16 9"/></svg><span>Сохранено</span></div>
+
+  <div class="sec" style="margin-top:24px">История бронирований</div>
+  <div id="profileHistory" class="no-data">Загружаю...</div>
+</div>
+
+<!-- HOME -->
+<div class="screen active" id="screen-home">
+  <div class="grid-2" style="margin-top:14px">
+    <div class="card accent" onclick="resetAndShowBook()">
+      <div class="card-icon" style="width:38px;height:38px;border-radius:12px;background:var(--accent-dim);border:1px solid rgba(184,115,51,0.25);display:flex;align-items:center;justify-content:center;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/></svg>
+      </div>
+      <h3>Забронировать</h3>
+      <p>Стол</p>
+      <span class="card-pill">Перейти <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg></span>
+    </div>
+    <div class="card" onclick="showScreen('menu')">
+      <div class="card-icon" style="width:38px;height:38px;border-radius:12px;background:var(--accent-dim);border:1px solid rgba(184,115,51,0.25);display:flex;align-items:center;justify-content:center;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.2"><path d="M7 3v7a2 2 0 002 2v9M7 3v7M9 3v7M11 3v7"/><path d="M17 3c-1.5 0-2.5 1.5-2.5 4s1 4 2.5 4v10"/></svg>
+      </div>
+      <h3>Меню</h3>
+      <p>Еда · Бар · Кальян</p>
+      <span class="card-pill">Открыть <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg></span>
+    </div>
+  </div>
+  <div class="grid-2">
+    <div class="card" onclick="showScreen('events')">
+      <div class="card-icon" style="width:38px;height:38px;border-radius:12px;background:var(--accent-dim);border:1px solid rgba(184,115,51,0.25);display:flex;align-items:center;justify-content:center;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.2" stroke-linejoin="round"><path d="M12 3l1.3 5.7L19 10l-5.7 1.3L12 17l-1.3-5.7L5 10l5.7-1.3L12 3z"/><path d="M18.5 3.5l.5 2 2 .5-2 .5-.5 2-.5-2-2-.5 2-.5.5-2z"/></svg>
+      </div>
+      <h3>Мероприятия</h3>
+      <p>Афиша</p>
+    </div>
+    <div class="card" onclick="showScreen('about')">
+      <div class="card-icon" style="width:38px;height:38px;border-radius:12px;background:var(--accent-dim);border:1px solid rgba(184,115,51,0.25);display:flex;align-items:center;justify-content:center;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.2"><polygon points="12 2 22 22 2 22"/></svg>
+      </div>
+      <h3>О заведении</h3>
+      <p>Концепция</p>
+    </div>
+  </div>
+  <div class="grid-2">
+    <div class="card" onclick="openMap()">
+      <div class="card-icon" style="width:38px;height:38px;border-radius:12px;background:var(--accent-dim);border:1px solid rgba(184,115,51,0.25);display:flex;align-items:center;justify-content:center;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.2"><path d="M12 2C8.5 2 6 4.8 6 8c0 5 6 14 6 14s6-9 6-14c0-3.2-2.5-6-6-6z"/><circle cx="12" cy="8" r="2"/></svg>
+      </div>
+      <h3>Как доехать</h3>
+      <p>Яндекс Карты</p>
+    </div>
+    <div class="card" onclick="openAdmin()">
+      <div class="card-icon" style="width:38px;height:38px;border-radius:12px;background:var(--accent-dim);border:1px solid rgba(184,115,51,0.25);display:flex;align-items:center;justify-content:center;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.2"><path d="M4 4h16v13H4z" rx="2"/><polyline points="4 17 8 21 12 17"/></svg>
+      </div>
+      <h3>Написать управляющему</h3>
+      <p>Если есть что сказать</p>
+    </div>
+  </div>
+  <div class="footer">На Крыше · Владикавказ<br>Ул. Весенняя 19Б</div>
+</div>
+
+<!-- BOOK -->
+<div class="screen" id="screen-book">
+  <div style="margin-top:14px"></div>
+  <div class="success-msg" id="successMsg"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" style="flex-shrink:0"><circle cx="12" cy="12" r="9"/><polyline points="8 12 11 15 16 9"/></svg><span>Заявка отправлена! Управляющий свяжется с вами для подтверждения.</span></div>
+  <div id="bookingContextBanner" style="display:none;background:var(--accent-dim);border:1px solid rgba(184,115,51,0.3);border-radius:12px;padding:12px 16px;font-size:13px;color:var(--accent);margin-bottom:14px;"></div>
+
+  <div class="form-group">
+    <label class="form-label">Имя</label>
+    <input class="form-input" id="bName" type="text" placeholder="Ваше имя">
+  </div>
+  <div class="form-group">
+    <label class="form-label">Телефон</label>
+    <input class="form-input" id="bPhone" type="tel" value="+7">
+  </div>
+  <div class="form-row form-group">
+    <div>
+      <label class="form-label">Дата</label>
+      <input class="form-input" id="bDate" type="date">
+    </div>
+    <div>
+      <label class="form-label">Время</label>
+      <input class="form-input" id="bTime" type="time" value="20:00">
+    </div>
+  </div>
+  <div class="form-group">
+    <label class="form-label">Количество гостей</label>
+    <select class="form-input" id="bGuests">
+      <option>1</option><option>2</option><option selected>3</option>
+      <option>4</option><option>5+</option>
+    </select>
+  </div>
+  <div class="form-group">
+    <label class="form-label">Комментарий</label>
+    <textarea class="form-input" id="bComment" placeholder="Пожелания по столу, повод, что-то важное..."></textarea>
+  </div>
+  <button class="btn-book" id="bookBtn" onclick="sendBooking()">Забронировать
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="vertical-align:-2px;margin-left:6px"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
+  </button>
+  <div style="height:16px"></div>
+</div>
+
+<!-- EVENTS -->
+<div class="screen" id="screen-events">
+  <div class="sec" style="margin-top:14px">Мероприятия</div>
+  <div id="eventsList"><div class="loading"><div class="spinner"></div>Загружаю...</div></div>
+</div>
+
+<!-- ABOUT -->
+<div class="screen" id="screen-about">
+  <div style="margin-top:14px"></div>
+  <div class="about-hero" style="background:var(--bg);border-color:var(--border);">
+    <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAjEAAASBCAYAAADFdc+7AAA2OklEQVR4nO3dT2yUZ77g+6eussKuWbpV7hVI2FmARo2dgatzJQ/2piUce3WOcGA1xEfYSAMdDVkkBxDQySIZpclIxqjd6RWJUc/KPo6mNzbtxZXIiY10BIvYkWB1XIqXt2y2dRc0dOePCX+e11W/qs9nlZNIj9/TxsXXz/v8Kf2qUkkAANH8X41+AACAlyFiAICQRAwAEJKIAQBCEjEAQEgiBgAIScQAACGJGAAgJBEDAIQkYgCAkEQMABCSiAEAQhIxAEBIIgYACEnEAAAhiRgAICQRAwCEJGIAgJBEDAAQkogBAEISMQBASCIGAAhJxAAAIYkYACAkEQMAhCRiAICQRAwAEJKIAQBCEjEAQEgiBgAIScQAACGJGAAgJBEDAIQkYgCAkEQMABCSiAEAQhIxAEBIIgYACEnEAAAhvdboBwBaW1//wfqhNw688jgz07OlDI8DtBARAxTq0BsH0vjpsVceZ2Z6NsPTAK3E6yQAICQRAwCEJGIAgJBEDAAQkogBAEISMQBASCIGAAhJxAAAIYkYACAkEQMAhCRiAICQRAwAEJKIAQBCEjEAQEgiBgAIScQAACGJGAAgJBEDAIQkYgCAkEQMABCSiAEAQhIxAEBIIgYACEnEAAAhiRgAICQRAwCEJGIAgJBEDAAQkogBAEISMQBASCIGAAhJxAAAIYkYACAkEQMAhCRiAICQRAwAEJKIAQBCEjEAQEgiBgAIScQAACGJGAAgJBEDAIQkYgCAkEQMABCSiAEAQhIxAEBIIgYACEnEAAAhiRgAICQRAwCEJGIAgJBEDAAQkogBAEISMQBASCIGAAhJxAAAIYkYACAkEQMAhCRiAICQRAwAEJKIAQBCEjEAQEgiBgAIScQAACGJGAAgJBEDAIQkYgCAkEQMABCSiAEAQhIxAEBIIgYACEnEAAAhiRgAICQRAwCEJGIAgJBEDAAQkogBAEISMQBASCIGAAhJxAAAIYkYACAkEQMAhCRiAICQRAwAEJKIAQBCEjEAQEgiBgAIScQAACGJGAAgJBEDAIQkYgCAkEQMABCSiAEAQhIxAEBIIgYACEnEAAAhiRgAICQRAwCEJGIAgJBEDAAQkogBAEISMQBASCIGAAhJxAAAIYkYACAkEQMAhCRiAICQRAwAEJKIAQBCEjEAQEgiBgAIScQAACGJGAAgJBEDAIQkYgCAkEQMABCSiAEAQhIxAEBIIgYACEnEAAAhiRgAICQRAwCEJGIAgJBEDAAQkogBAEISMQBASCIGAAhJxAAAIYkYACAkEQMAhCRiAICQRAwAEJKIAQBCEjEAQEgiBgAIScQAACGJGAAgJBEDAIQkYgCAkEQMABCSiAEAQhIxAEBIIgYACEnEAAAhiRgAICQRAwCEJGIAgJBEDAAQkogBAEISMQBASCIGAAhJxAAAIYkYACAkEQMAhCRiAICQRAwAEJKIAQBCEjEAQEgiBgAIScQAACGJGAAgJBEDAIQkYgCAkEQMABCSiAEAQhIxAEBIIgYACEnEAAAhiRgAICQRAwCEJGIAgJBEDAAQkogBAEISMQBASCIGAAhJxAAAIYkYACAkEQMAhCRiAICQRAwAEJKIAQBCEjEAQEgiBgAIScQAACGJGAAgJBEDAIQkYgCAkEQMABCSiAEAQhIxAEBIIgYACEnEAAAhiRgAICQRAwCEJGIAgJBEDAAQkogBAEISMQBASCIGAAhJxAAAIYkYACAkEQMAhCRiAICQRAwAEJKIAQBCEjEAQEgiBgAIScQAACGJGAAgJBEDAIQkYgCAkEQMABCSiAEAQhIxAEBIIgYACEnEAAAhiRgAICQRAwCEJGIAgJBEDAAQkogBAEISMQBASCIGAAhJxAAAIYkYACAkEQMAhCRiAICQRAwAEJKIAQBCEjEAQEgiBgAIScQAACGJGAAgJBEDAIQkYgCAkEQMABCSiAEAQhIxAEBIIgYACEnEAAAhiRgAICQRAwCEJGIAgJBEDAAQkogBAEISMQBASCIGAAhJxAAAIYkYACAkEQMAhCRiAICQRAwAEJKIAQBCEjEAQEgiBgAIScQAACGJGAAgJBEDAIQkYgCAkEQMABCSiAEAQhIxAEBIIgYACEnEAAAhiRgAICQRAwCEJGIAgJBEDAAQkogBAEISMQBASCIGAAhJxAAAIYkYACAkEQMAhCRiAICQRAwAEJKIAQBCEjEAQEgiBgAIScQAACGJGAAgJBEDAIQkYgCAkEQMABCSiAEAQhIxAEBIIgYACEnEAAAhiRgAICQRAwCEJGIAgJBEDAAQkogBAEISMQBASCIGAAhJxAAAIYkYACAkEQMAhCRiAICQRAwAEJKIAQBCEjEAQEgi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" alt="На Крыше" style="max-height:140px;margin:0 auto 16px;display:block;">
+    <p>Для нас нет ничего важнее счастья гостя<br>Каждая деталь — ради вашего вечера</p>
+  </div>
+  <div class="sec">Информация</div>
+  <div class="faq-item" style="cursor:default">
+    <div class="faq-q" style="cursor:default">
+      <span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" style="vertical-align:-3px;margin-right:6px"><path d="M12 2C8.5 2 6 4.8 6 8c0 5 6 14 6 14s6-9 6-14c0-3.2-2.5-6-6-6z"/><circle cx="12" cy="8" r="2"/></svg>Адрес</span>
+      <span style="font-size:13px;color:var(--text-muted);font-weight:400">Весенняя 19Б</span>
+    </div>
+  </div>
+  <div class="faq-item" style="cursor:default">
+    <div class="faq-q" style="cursor:default">
+      <span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" style="vertical-align:-3px;margin-right:6px"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>Часы работы</span>
+      <span style="font-size:13px;color:var(--text-muted);font-weight:400">13:00 – 01:00</span>
+    </div>
+  </div>
+  <div class="faq-item" onclick="openMap()" style="cursor:pointer">
+    <div class="faq-q">
+      <span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" style="vertical-align:-3px;margin-right:6px"><path d="M12 2C8.5 2 6 4.8 6 8c0 5 6 14 6 14s6-9 6-14c0-3.2-2.5-6-6-6z"/><circle cx="12" cy="8" r="2"/></svg>Как доехать</span>
+      <span style="font-size:13px;color:var(--accent);font-weight:400">Яндекс Карты →</span>
+    </div>
+  </div>
+  <div class="faq-item" onclick="openAdmin()" style="cursor:pointer">
+    <div class="faq-q">
+      <span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" style="vertical-align:-3px;margin-right:6px"><path d="M4 4h16v13H4z"/><polyline points="4 17 8 21 12 17"/></svg>Написать управляющему</span>
+      <span style="font-size:13px;color:var(--accent);font-weight:400">Написать →</span>
+    </div>
+  </div>
+</div>
+
+<!-- FAQ -->
+<div class="screen" id="screen-faq">
+  <div class="sec" style="margin-top:14px">Часто задаваемые вопросы</div>
+  <div class="faq-item">
+    <div class="faq-q" onclick="toggleFaq(this)">Как забронировать стол?<span class="faq-ch">›</span></div>
+    <div class="faq-a">Нажмите "Бронь" внизу экрана, заполните форму и нажмите "Забронировать". Управляющий свяжется с вами для подтверждения.</div>
+  </div>
+  <div class="faq-item">
+    <div class="faq-q" onclick="toggleFaq(this)">Есть ли дресс-код?<span class="faq-ch">›</span></div>
+    <div class="faq-a">Строгого дресс-кода нет, но мы ценим опрятный внешний вид.</div>
+  </div>
+  <div class="faq-item">
+    <div class="faq-q" onclick="toggleFaq(this)">Можно ли прийти без брони?<span class="faq-ch">›</span></div>
+    <div class="faq-a">Да. В выходные вечером рекомендуем бронировать заранее.</div>
+  </div>
+  <div class="faq-item">
+    <div class="faq-q" onclick="toggleFaq(this)">Есть ли парковка?<span class="faq-ch">›</span></div>
+    <div class="faq-a">Да, рядом с заведением есть парковочные места.</div>
+  </div>
+  <div class="faq-item">
+    <div class="faq-q" onclick="toggleFaq(this)">Проводите ли вы мероприятия?<span class="faq-ch">›</span></div>
+    <div class="faq-a">Да! Следите за афишей во вкладке "Мероприятия".</div>
+  </div>
+  <div class="faq-item">
+    <div class="faq-q" onclick="toggleFaq(this)">Как связаться с заведением?<span class="faq-ch">›</span></div>
+    <div class="faq-a">Напишите управляющему через кнопку на главной странице.</div>
+  </div>
+</div>
+
+<!-- CANCEL CONFIRM MODAL -->
+<div class="confirm-overlay" id="cancelConfirmOverlay">
+  <div class="confirm-card">
+    <div class="confirm-title">Отменить бронь?</div>
+    <div class="confirm-sub" id="cancelConfirmDate"></div>
+    <div class="confirm-buttons">
+      <button class="confirm-btn" onclick="closeCancelConfirm()">Назад</button>
+      <button class="confirm-btn danger" onclick="confirmCancelBooking()">Да, отменить</button>
+    </div>
+  </div>
+</div>
+
+<!-- BOOKING OVERLAY -->
+<div class="booking-overlay" id="bookingOverlay">
+  <div class="booking-overlay-card">
+    <div class="booking-overlay-icon">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 12 9 17 20 6"/></svg>
+    </div>
+    <div class="booking-overlay-title">Бронь отправлена</div>
+    <div class="booking-overlay-sub">Ожидайте подтверждения</div>
+  </div>
+</div>
+
+<!-- BOTTOM NAV -->
+<nav class="bottom-nav">
+  <button class="nav-tab active" onclick="showScreen('home')">
+    <span class="nav-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M3 11L12 3l9 8"/><path d="M5 9v11h5v-6h4v6h5V9"/></svg></span>Главная
+  </button>
+  <button class="nav-tab" onclick="resetAndShowBook()">
+    <span class="nav-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/></svg></span>Бронь
+  </button>
+  <button class="nav-tab" onclick="showScreen('faq')">
+    <span class="nav-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a3 3 0 0 1 5.5 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12" y2="17" stroke-linecap="round" stroke-width="2"/></svg></span>FAQ
+  </button>
+</nav>
+
+<script>
+  const tg = window.Telegram?.WebApp;
+  if (tg) { tg.ready(); tg.expand(); tg.setHeaderColor('#140B00'); tg.setBackgroundColor('#140B00'); }
+
+  const ADMIN_USERNAME = 'zermatttt';
+  const NOTION_DB = '35173a71663680999ebcf882ecea022d';
+
+  // Set today as min date for booking
+  const today = new Date().toISOString().split('T')[0];
+  document.getElementById('bDate').value = today;
+  document.getElementById('bDate').min = today;
+
+  // Status
+  function checkStatus() {
+    const h = new Date().getHours();
+    const open = h >= 13;
+    if (!open) {
+      document.getElementById('statusDot').classList.add('closed');
+      document.getElementById('statusText').textContent = 'Сейчас закрыто';
+    }
+  }
+
+  // Navigation
+  const screens = ['home','book','events','about','faq','menu','bar','vip','profile','admin'];
+  function showScreen(name) {
+    if (name !== 'bar' && typeof storiesState !== 'undefined' && storiesState.bar.timer) {
+      clearTimeout(storiesState.bar.timer);
+      storiesState.bar.timer = null;
+    }
+    if (name !== 'vip' && typeof storiesState !== 'undefined' && storiesState.vip.timer) {
+      clearTimeout(storiesState.vip.timer);
+      storiesState.vip.timer = null;
+    }
+    screens.forEach(s => {
+      document.getElementById('screen-'+s).classList.remove('active');
+    });
+    document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+    document.getElementById('screen-'+name).classList.add('active');
+    const navMap = {'home':0,'book':1,'about':2,'faq':3};
+    const idx = navMap[name];
+    if (idx !== undefined) document.querySelectorAll('.nav-tab')[idx].classList.add('active');
+    if (name === 'events') {
+      document.querySelectorAll('.nav-tab')[1].classList.remove('active');
+    }
+    window.scrollTo(0,0);
+    if (name === 'events') loadEvents();
+    document.getElementById('successMsg').style.display = 'none';
+  }
+
+  function resetAndShowBook() {
+    bookingContext = null;
+    const banner = document.getElementById('bookingContextBanner');
+    if (banner) banner.style.display = 'none';
+    showScreen('book');
+    prefillBookingForm();
+  }
+
+  // Map
+  function openMap() {
+    const url = 'https://yandex.ru/maps/?text=Владикавказ+Весенняя+19Б';
+    if (tg) tg.openLink(url); else window.open(url,'_blank');
+  }
+
+  // Admin
+  function openAdmin() {
+    const url = 'https://t.me/' + ADMIN_USERNAME;
+    if (tg) tg.openTelegramLink(url); else window.open(url,'_blank');
+  }
+
+  // FAQ
+  function toggleFaq(el) { el.parentElement.classList.toggle('open'); }
+
+  // Booking
+  let bookingContext = null; // { type: 'vip', room: 'VIP-комната 1' }
+
+  function bookVipRoom() {
+    const roomNames = ['VIP-комната 1', 'VIP-комната 2', 'VIP-комната 3'];
+    const idx = storiesState.vip.cur;
+    bookingContext = { type: 'vip', room: roomNames[idx] || 'VIP-комната' };
+    showScreen('book');
+    prefillBookingForm();
+    const banner = document.getElementById('bookingContextBanner');
+    if (banner) {
+      banner.textContent = `🔺 Бронируете: ${bookingContext.room}`;
+      banner.style.display = 'block';
+    }
+  }
+
+  async function sendBooking() {
+    const btn = document.getElementById('bookBtn');
+    if (btn.disabled) return; // защита от повторного нажатия
+
+    const name = document.getElementById('bName').value.trim();
+    const phone = document.getElementById('bPhone').value.trim();
+    const date = document.getElementById('bDate').value;
+    const time = document.getElementById('bTime').value;
+    const guests = document.getElementById('bGuests').value;
+    const comment = document.getElementById('bComment').value.trim();
+
+    if (!name || !phone) {
+      alert('Пожалуйста, укажите имя и телефон');
+      return;
+    }
+
+    const dateStr = date ? new Date(date).toLocaleDateString('ru-RU', {day:'numeric',month:'long'}) : '—';
+    const room = bookingContext && bookingContext.type === 'vip' ? bookingContext.room : null;
+    const eventName = bookingContext && bookingContext.type === 'event' ? bookingContext.name : null;
+    const user = getTelegramUser();
+
+    btn.disabled = true;
+    btn.style.opacity = '0.6';
+    const originalText = btn.innerHTML;
+    btn.innerHTML = 'Отправляем...';
+
+    // Сохраняем бронь + бот сам пришлёт подтверждение гостю и уведомление администратору
+    try {
+      await fetch('https://notion-proxy-na-kryishe-production.up.railway.app/api/booking', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name, phone, date: dateStr, time, guests, comment, room, eventName,
+          telegramId: user?.id || null,
+          telegramUsername: user?.username || null
+        })
+      });
+    } catch {}
+
+    showBookingOverlay();
+    bookingContext = null;
+    const banner = document.getElementById('bookingContextBanner');
+    if (banner) banner.style.display = 'none';
+    window.scrollTo(0,0);
+
+    btn.disabled = false;
+    btn.style.opacity = '1';
+    btn.innerHTML = originalText;
+  }
+
+  function showBookingOverlay() {
+    const overlay = document.getElementById('bookingOverlay');
+    // Перезапускаем анимацию галочки при каждом показе
+    const checkSvg = overlay.querySelector('svg');
+    checkSvg.style.animation = 'none';
+    void checkSvg.offsetWidth;
+    checkSvg.style.animation = '';
+
+    overlay.classList.add('show');
+    setTimeout(() => {
+      overlay.classList.remove('show');
+    }, 3000);
+  }
+
+  // Events
+  const MONTHS = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'];
+
+  async function loadEvents() {
+    const list = document.getElementById('eventsList');
+    try {
+      const res = await fetch('https://notion-proxy-na-kryishe-production.up.railway.app/api/events');
+      if (!res.ok) throw new Error();
+      const events = await res.json();
+      renderEvents(events, list);
+    } catch {
+      list.innerHTML = '<div class="no-data">Мероприятия временно недоступны</div>';
+    }
+  }
+
+  function renderEvents(events, el) {
+    if (!events.length) {
+      el.innerHTML = '<div class="no-data">Ближайших мероприятий пока нет 🎭<br><br>Следите за обновлениями</div>';
+      return;
+    }
+    el.innerHTML = events.map((e, i) => {
+      const d = new Date(e.date);
+      const safeName = e.name.replace(/'/g, "\\'");
+
+      // Если в дате указано точное время (не только дата) — показываем его
+      const hasTime = typeof e.date === 'string' && e.date.includes('T');
+      const timeStr = hasTime
+        ? d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
+        : null;
+
+      return `<div class="event-item-wrap">
+        <div class="event-item" onclick="toggleEvent(${i})" style="cursor:pointer">
+          <div class="event-date"><div class="day">${d.getDate()}</div><div class="mon">${MONTHS[d.getMonth()]}</div></div>
+          <div class="event-div"></div>
+          <div class="event-info"><h4>${e.name}</h4><p>${e.format}${timeStr ? ' · ' + timeStr : ''}</p></div>
+          ${e.format ? `<span class="event-tag">${e.format}</span>` : ''}
+          <svg class="event-chevron" id="eventChevron${i}" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin-left:8px;flex-shrink:0;transition:transform 0.2s;color:var(--text-muted)"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="event-detail" id="eventDetail${i}" style="display:none;">
+          <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--accent);margin-bottom:10px;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>
+            <span>Начало: ${timeStr || 'уточняется'}</span>
+          </div>
+          ${e.description ? `<p style="font-size:13px;color:var(--text-sub);line-height:1.6;margin-bottom:14px;">${e.description}</p>` : ''}
+          <button class="btn-book" onclick="bookForEvent('${safeName}')">Забронировать на мероприятие
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="vertical-align:-2px;margin-left:6px"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
+          </button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  function toggleEvent(i) {
+    const detail = document.getElementById('eventDetail' + i);
+    const chevron = document.getElementById('eventChevron' + i);
+    const isOpen = detail.style.display !== 'none';
+    detail.style.display = isOpen ? 'none' : 'block';
+    chevron.style.transform = isOpen ? 'rotate(0deg)' : 'rotate(180deg)';
+  }
+
+  function bookForEvent(eventName) {
+    bookingContext = { type: 'event', name: eventName };
+    showScreen('book');
+    prefillBookingForm();
+    const banner = document.getElementById('bookingContextBanner');
+    if (banner) {
+      banner.textContent = `🎉 Бронируете на: ${eventName}`;
+      banner.style.display = 'block';
+    }
+  }
+
+
+  // Stories logic
+  const storiesState = { bar: { cur: 0, timer: null }, vip: { cur: 0, timer: null } };
+  let touchStartX = 0;
+
+  function storyTouchStart(e, id) { touchStartX = e.touches[0].clientX; }
+  function storyTouchEnd(e, id) {
+    const diff = e.changedTouches[0].clientX - touchStartX;
+    if (Math.abs(diff) > 40) diff < 0 ? nextStory(id) : prevStory(id);
+  }
+  function storyClick(e, id) {
+    const w = e.currentTarget.offsetWidth;
+    e.clientX > w / 2 ? nextStory(id) : prevStory(id);
+  }
+
+  function initStories(id) {
+    const slides = document.querySelectorAll('#' + id + 'Slides .story-slide');
+    const prog = document.getElementById(id + 'Progress');
+    prog.innerHTML = Array.from(slides).map(() =>
+      '<div class="story-prog-bar"><div class="story-prog-fill"></div></div>'
+    ).join('');
+    storiesState[id].cur = 0;
+    showStory(id, 0);
+  }
+
+  function showStory(id, idx) {
+    const slides = document.querySelectorAll('#' + id + 'Slides .story-slide');
+    const fills = document.querySelectorAll('#' + id + 'Progress .story-prog-fill');
+    if (idx >= slides.length) { showScreen('home'); return; }
+    if (idx < 0) idx = 0;
+    storiesState[id].cur = idx;
+
+    slides.forEach((s, i) => s.classList.toggle('active', i === idx));
+    fills.forEach((f, i) => {
+      f.classList.remove('active-fill');
+      f.style.animation = 'none';
+      f.style.width = i < idx ? '100%' : '0%';
+    });
+
+    if (storiesState[id].timer) clearTimeout(storiesState[id].timer);
+    void fills[idx].offsetWidth;
+    fills[idx].classList.add('active-fill');
+    storiesState[id].timer = setTimeout(() => nextStory(id), 5000);
+  }
+
+  function nextStory(id) { showStory(id, storiesState[id].cur + 1); }
+  function prevStory(id) { showStory(id, storiesState[id].cur - 1); }
+
+  // Init stories when screen opens
+  const _origShowScreen = showScreen;
+  showScreen = function(name) {
+    _origShowScreen(name);
+    if (name === 'bar') initStories('bar');
+    if (name === 'vip') initStories('vip');
+    if (name === 'profile') loadProfile();
+    if (name === 'admin') loadAdminBookings();
+  };
+
+  // ─── PROFILE ─────────────────────────────────────
+
+  const PROXY_BASE = 'https://notion-proxy-na-kryishe-production.up.railway.app';
+
+  // Заполняем дни 1-31
+  (function fillDays() {
+    const sel = document.getElementById('pBirthDay');
+    for (let d = 1; d <= 31; d++) {
+      const opt = document.createElement('option');
+      opt.value = String(d).padStart(2, '0');
+      opt.textContent = d;
+      sel.appendChild(opt);
+    }
+  })();
+
+  function getTelegramUser() {
+    return tg?.initDataUnsafe?.user || null;
+  }
+
+  function openProfile() {
+    showScreen('profile');
+  }
+
+  async function loadProfile() {
+    const user = getTelegramUser();
+    const avatarEl = document.getElementById('profileAvatar');
+    const nameEl = document.getElementById('profileName');
+    const usernameEl = document.getElementById('profileUsername');
+    const nameField = document.getElementById('pName');
+
+    const telegramFullName = user ? ([user.first_name, user.last_name].filter(Boolean).join(' ') || 'Гость') : 'Гость';
+
+    if (user) {
+      nameEl.textContent = telegramFullName;
+      usernameEl.textContent = user.username ? '@' + user.username : '';
+      avatarEl.textContent = telegramFullName.charAt(0).toUpperCase();
+      if (user.photo_url) {
+        avatarEl.innerHTML = `<img src="${user.photo_url}" style="width:100%;height:100%;object-fit:cover;">`;
+      }
+    } else {
+      nameEl.textContent = 'Гость';
+      usernameEl.textContent = '';
+    }
+
+    // Подставляем ранее сохранённое имя (если гость его правил), иначе имя из Telegram
+    const saved = getSavedProfile();
+    if (!nameField.value) {
+      nameField.value = (saved && saved.name) ? saved.name : telegramFullName;
+    }
+
+    // Подставляем ранее сохранённый телефон и дату рождения из памяти устройства
+    const phoneField = document.getElementById('pPhone');
+    if ((!phoneField.value || phoneField.value === '+7') && saved && saved.phone) {
+      phoneField.value = saved.phone;
+    }
+    if (saved && saved.day) document.getElementById('pBirthDay').value = saved.day;
+    if (saved && saved.month) document.getElementById('pBirthMonth').value = saved.month;
+
+    // Пытаемся подтянуть уже сохранённые данные по номеру телефона (если введён)
+    const phone = phoneField.value.trim();
+    if (phone && phone !== '+7') {
+      await fetchGuestData(phone);
+    } else {
+      document.getElementById('profileHistory').textContent = 'Укажите телефон и сохраните — тогда покажем историю броней';
+      document.getElementById('profileHistory').className = 'no-data';
+    }
+  }
+
+  async function fetchGuestData(phone) {
+    const historyEl = document.getElementById('profileHistory');
+    historyEl.textContent = 'Загружаю...';
+    try {
+      const res = await fetch(`${PROXY_BASE}/api/guest?phone=${encodeURIComponent(phone)}`);
+      const guest = await res.json();
+
+      if (!guest) {
+        historyEl.textContent = 'У вас пока нет бронирований';
+        historyEl.className = 'no-data';
+        return;
+      }
+
+      if (guest.birthday) {
+        const parts = guest.birthday.split('-');
+        if (parts.length === 3) {
+          document.getElementById('pBirthMonth').value = parts[1];
+          document.getElementById('pBirthDay').value = parts[2];
+        }
+      }
+
+      if (guest.history) {
+        const dates = guest.history.split(',').map(s => s.trim()).filter(Boolean).reverse();
+        const activeCount = dates.filter(d => !d.includes('(отменено)')).length;
+
+        const calendarIcon = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/></svg>';
+        const xIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>';
+
+        const itemsHtml = dates.map(d => {
+          const cancelled = d.includes('(отменено)');
+          const cleanEntry = d.replace(' (отменено)', '');
+          return `<div class="history-item ${cancelled ? 'cancelled' : ''}">
+            <div class="history-icon" style="color:${cancelled ? 'var(--text-muted)' : 'var(--accent)'}">${calendarIcon}</div>
+            <div>
+              <div class="history-text">${cleanEntry}</div>
+              ${cancelled ? '<div class="history-status">Отменено</div>' : ''}
+            </div>
+            <div style="flex:1"></div>
+            ${cancelled ? '' : `<button class="history-cancel-btn" onclick="openCancelConfirm('${phone}','${cleanEntry.replace(/'/g,"\\'")}')">${xIcon}</button>`}
+          </div>`;
+        }).join('');
+
+        historyEl.innerHTML =
+          `<div class="history-summary">
+            <span class="sec" style="margin:0">Ваши брони</span>
+            <span class="history-count-badge">${activeCount} активных</span>
+          </div>` + itemsHtml;
+        historyEl.className = '';
+      } else {
+        historyEl.textContent = 'У вас пока нет бронирований';
+        historyEl.className = 'no-data';
+      }
+    } catch {
+      historyEl.textContent = 'Не удалось загрузить историю';
+      historyEl.className = 'no-data';
+    }
+  }
+
+  let pendingCancel = null;
+
+  function openCancelConfirm(phone, entry, refreshFn) {
+    pendingCancel = { phone, entry, refreshFn: refreshFn || (() => fetchGuestData(phone)) };
+    document.getElementById('cancelConfirmDate').textContent = entry;
+    document.getElementById('cancelConfirmOverlay').classList.add('show');
+  }
+
+  function closeCancelConfirm() {
+    pendingCancel = null;
+    document.getElementById('cancelConfirmOverlay').classList.remove('show');
+  }
+
+  async function confirmCancelBooking() {
+    if (!pendingCancel) return;
+    const { phone, entry, refreshFn } = pendingCancel;
+    closeCancelConfirm();
+    try {
+      await fetch(`${PROXY_BASE}/api/booking/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, entry })
+      });
+      if (refreshFn) refreshFn();
+    } catch {
+      alert('Не удалось отменить бронь. Попробуйте позже.');
+    }
+  }
+
+  // ─── ADMIN: СПИСОК И ОТМЕНА БРОНЕЙ ────────────────
+
+  async function loadAdminBookings() {
+    const el = document.getElementById('adminBookingsList');
+    el.textContent = 'Загружаю...';
+    el.className = 'no-data';
+    try {
+      const res = await fetch(`${PROXY_BASE}/api/admin/bookings`);
+      const bookings = await res.json();
+
+      if (!bookings.length) {
+        el.textContent = 'Активных броней нет';
+        el.className = 'no-data';
+        return;
+      }
+
+      const calendarIcon = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/></svg>';
+      const xIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>';
+
+      el.innerHTML = bookings.map(b => `
+        <div class="history-item">
+          <div class="history-icon" style="color:var(--accent)">${calendarIcon}</div>
+          <div>
+            <div class="history-text">${b.entry}</div>
+            <div class="history-status" style="color:var(--text-sub)">${b.name} · ${b.phone}</div>
+          </div>
+          <div style="flex:1"></div>
+          <button class="history-cancel-btn" onclick="openCancelConfirm('${b.phone}','${b.entry.replace(/'/g,"\\'")}', loadAdminBookings)">${xIcon}</button>
+        </div>
+      `).join('');
+      el.className = '';
+    } catch {
+      el.textContent = 'Не удалось загрузить список';
+      el.className = 'no-data';
+    }
+  }
+
+  async function saveProfile() {
+    const phone = document.getElementById('pPhone').value.trim();
+    const day = document.getElementById('pBirthDay').value;
+    const month = document.getElementById('pBirthMonth').value;
+    const fullName = document.getElementById('pName').value.trim() || 'Гость';
+
+    if (!phone || phone === '+7') {
+      alert('Укажите номер телефона');
+      return;
+    }
+
+    const user = getTelegramUser();
+    const username = user?.username || '';
+
+    let birthday = null;
+    if (day && month) {
+      const year = new Date().getFullYear() - 25; // условный год, важны день+месяц
+      birthday = `${year}-${month}-${day}`;
+    }
+
+    try {
+      await fetch(`${PROXY_BASE}/api/profile`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: fullName, username, phone, birthday, telegramId: user?.id || null })
+      });
+
+      // Сохраняем локально для автоподстановки в форму бронирования и профиля
+      try {
+        localStorage.setItem('nk_profile', JSON.stringify({ name: fullName, phone, day, month }));
+      } catch {}
+
+      const msg = document.getElementById('profileSaveMsg');
+      msg.style.display = 'flex';
+      setTimeout(() => { msg.style.display = 'none'; }, 3000);
+
+      fetchGuestData(phone);
+    } catch {
+      alert('Не удалось сохранить. Попробуйте ещё раз.');
+    }
+  }
+
+  // ─── АВТОПОДСТАНОВКА ПРОФИЛЯ В ФОРМУ БРОНИ ───────
+
+  function getSavedProfile() {
+    try {
+      const raw = localStorage.getItem('nk_profile');
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function prefillBookingForm() {
+    const saved = getSavedProfile();
+    if (saved) {
+      if (saved.name) document.getElementById('bName').value = saved.name;
+      if (saved.phone) document.getElementById('bPhone').value = saved.phone;
+    }
+  }
+
+  // ─── АВАТАР В ШАПКЕ ───────────────────────────────
+
+  function initHeaderAvatar() {
+    const user = getTelegramUser();
+    const el = document.getElementById('headerAvatar');
+    if (!user) return;
+
+    const initial = (user.first_name || 'Г').charAt(0).toUpperCase();
+
+    if (user.photo_url) {
+      const img = new Image();
+      img.referrerPolicy = 'no-referrer';
+      img.style.cssText = 'width:100%;height:100%;object-fit:cover;';
+      img.onload = () => { el.textContent = ''; el.appendChild(img); };
+      img.onerror = () => { el.textContent = initial; };
+      img.src = user.photo_url;
+    } else {
+      el.textContent = initial;
+    }
+  }
+
+  checkStatus();
+  loadEvents();
+  initHeaderAvatar();
+
+  // Скрытый вход для администратора: ?admin=1 в ссылке
+  if (new URLSearchParams(window.location.search).get('admin') === '1') {
+    showScreen('admin');
+  }
+</script>
+</body>
+
+</html>
