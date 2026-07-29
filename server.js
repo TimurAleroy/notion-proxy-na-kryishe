@@ -124,7 +124,7 @@ async function cancelBookingInternal(phone, entry) {
   const props = guest.properties;
   const historyText = props['История броней']?.rich_text?.[0]?.plain_text || '';
   const entries = historyText.split(',').map(s => s.trim());
-  const updatedEntries = entries.map(e => e === entry ? `${entry} (отменено)` : e);
+  const updatedEntries = entries.map(e => e.replace(' (подтверждено)', '') === entry ? `${entry} (отменено)` : e);
   const newHistory = updatedEntries.join(', ');
   const currentCount = props['Количество броней']?.number || 0;
 
@@ -147,6 +147,30 @@ async function cancelBookingInternal(phone, entry) {
   }
 
   return { ok: true, guestName, telegramId };
+}
+
+// Помечаем бронь как подтверждённую в истории (используется при нажатии "✅ Подтвердить")
+async function confirmBookingInternal(phone, entry) {
+  const guest = await findGuestByPhone(phone);
+  if (!guest) return { ok: false };
+
+  const props = guest.properties;
+  const historyText = props['История броней']?.rich_text?.[0]?.plain_text || '';
+  const entries = historyText.split(',').map(s => s.trim());
+  const updatedEntries = entries.map(e => e === entry ? `${entry} (подтверждено)` : e);
+  const newHistory = updatedEntries.join(', ');
+
+  await fetch(`https://api.notion.com/v1/pages/${guest.id}`, {
+    method: 'PATCH',
+    headers: NOTION_HEADERS,
+    body: JSON.stringify({
+      properties: {
+        'История броней': { rich_text: [{ text: { content: newHistory.slice(0, 1900) } }] }
+      }
+    })
+  });
+
+  return { ok: true };
 }
 
 // ─── BOOKING → GUESTS DB + УВЕДОМЛЕНИЯ ────────────
@@ -344,6 +368,40 @@ app.get('/api/guest', async (req, res) => {
   }
 });
 
+// ─── СТАТУС ПОСЛЕДНЕЙ АКТИВНОЙ БРОНИ ───────────────
+
+app.get('/api/booking/status', async (req, res) => {
+  const phone = req.query.phone;
+  if (!phone) return res.status(400).json({ error: 'phone required' });
+
+  try {
+    const guest = await findGuestByPhone(phone);
+    if (!guest) return res.json({ status: 'none' });
+
+    const historyText = guest.properties['История броней']?.rich_text?.[0]?.plain_text || '';
+    const entries = historyText.split(',').map(s => s.trim()).filter(Boolean);
+
+    // Ищем последнюю не отменённую бронь (самая свежая — последняя в списке)
+    let latestActive = null;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      if (!entries[i].includes('(отменено)')) {
+        latestActive = entries[i];
+        break;
+      }
+    }
+
+    if (!latestActive) return res.json({ status: 'none' });
+
+    if (latestActive.includes('(подтверждено)')) {
+      return res.json({ status: 'confirmed', entry: latestActive.replace(' (подтверждено)', '') });
+    }
+    return res.json({ status: 'pending', entry: latestActive });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch status' });
+  }
+});
+
 // ─── ADMIN: ВСЕ АКТИВНЫЕ БРОНИ ─────────────────────
 
 app.get('/api/admin/bookings', async (req, res) => {
@@ -418,6 +476,7 @@ app.post('/telegram-webhook', async (req, res) => {
         await tgApi('answerCallbackQuery', { callback_query_id: cq.id, text: 'Информация устарела', show_alert: false });
       } else if (action === 'confirm') {
         record.confirmed = true;
+        await confirmBookingInternal(record.phone, record.entry);
         if (record.telegramId) {
           await sendTelegramMessage(record.telegramId, `🎉 Бронь подтверждена! Ждём вас.\n\n🗓 ${record.entry}`);
         }
