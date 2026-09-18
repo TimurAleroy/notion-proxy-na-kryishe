@@ -15,6 +15,11 @@ const NOTION_PROBLEMS_DB_ID = '88be90a6768e4c9da2819565e1a69f62'; // Пробл�
 const NOTION_MENU_DB_ID = '4640c3e50a71422e8d61830c060f52c8'; // Меню — общий источник с стоп-листом персонала
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || '188483198';
+// Общий секрет со стаф-бэкендом (staff-proxy-na-kryishe) — нужен, чтобы панель
+// управления в стаф-приложении могла подтверждать/отменять/переносить брони
+// и при этом гость получал то же автосообщение, что и при подтверждении через
+// кнопки в этом Telegram-боте. Без него /api/internal/* просто отвечает 401.
+const INTERNAL_ADMIN_KEY = process.env.INTERNAL_ADMIN_KEY;
 const WEBAPP_URL = 'https://timuraleroy.github.io/na-kryishe';
 const PORT = process.env.PORT || 3000;
 
@@ -52,18 +57,34 @@ function normalizePhone(raw) {
   return digits;
 }
 
-// Каждая запись в "Истории броней" хранится как "ISO-дата|текст|тип" (плюс статус в конце).
+// Каждая запись в "Истории броней" хранится как:
+// "ISO-дата|текст|тип|uid|гостей|комментарий" (плюс статус-суффикс в конце).
 // Тип нужен чтобы разные виды броней (стол/VIP/мероприятие) не мешали друг другу.
+// Гостей/комментарий — новые поля (раньше эти данные летели только в Telegram
+// и терялись после того как сообщение уходило из виду). Старые записи без этих
+// полей парсятся так же нормально — просто guests/comment будут пустыми.
 function stripSuffix(raw) {
   return raw.replace(' (подтверждено)', '').replace(' (отменено)', '');
+}
+// В комментарии гостя вырезаем "|" и "," — это служебные разделители формата,
+// иначе комментарий может случайно разорвать запись или всю историю.
+function sanitizeBookingComment(s) {
+  return String(s || '').replace(/[|,]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
 }
 function parseEntry(raw) {
   const clean = stripSuffix(raw);
   const parts = clean.split('|');
-  if (parts.length >= 4) return { iso: parts[0], display: parts[1], kind: parts[2], uid: parts.slice(3).join('|') };
-  if (parts.length === 3) return { iso: parts[0], display: parts[1], kind: parts[2], uid: null };
-  if (parts.length === 2) return { iso: parts[0], display: parts[1], kind: 'table', uid: null };
-  return { iso: null, display: parts[0], kind: 'table', uid: null };
+  if (parts.length === 1) {
+    return { iso: null, display: parts[0], kind: 'table', uid: null, guests: null, comment: '' };
+  }
+  return {
+    iso: parts[0] || null,
+    display: parts[1] || '',
+    kind: parts[2] || 'table',
+    uid: parts[3] || null,
+    guests: parts[4] ? (Number(parts[4]) || null) : null,
+    comment: parts[5] || ''
+  };
 }
 function displayEntry(raw) {
   return parseEntry(raw).display;
@@ -393,7 +414,7 @@ function formatDateRu(isoDate) {
   return `${d}.${m}.${y}`;
 }
 
-async function editBookingInternal(phone, oldEntry, newDateISO, newTime) {
+async function editBookingInternal(phone, oldEntry, newDateISO, newTime, newGuests, newComment) {
   const guest = await findGuestByPhone(phone);
   if (!guest) return { ok: false };
 
@@ -405,7 +426,10 @@ async function editBookingInternal(phone, oldEntry, newDateISO, newTime) {
   const suffix = extractSuffix(parsed.display);
   const newDisplayText = `${formatDateRu(newDateISO)} ${newTime}${suffix}`;
   const newIsoDateTime = `${newDateISO}T${newTime}:00`;
-  const newEntry = `${newIsoDateTime}|${newDisplayText}|${parsed.kind}|${parsed.uid}`;
+  // Если гостей/комментарий не передали явно — сохраняем то, что было в старой записи
+  const guestsOut = newGuests !== undefined && newGuests !== null ? String(newGuests).replace(/\D/g, '').slice(0, 4) : (parsed.guests !== null ? String(parsed.guests) : '');
+  const commentOut = newComment !== undefined ? sanitizeBookingComment(newComment) : (parsed.comment || '');
+  const newEntry = `${newIsoDateTime}|${newDisplayText}|${parsed.kind}|${parsed.uid}|${guestsOut}|${commentOut}`;
 
   const updatedEntries = entries.map(e => stripSuffix(e) === oldEntry ? `${newEntry} (подтверждено)` : e);
   const newHistory = updatedEntries.join(', ');
@@ -425,6 +449,89 @@ async function editBookingInternal(phone, oldEntry, newDateISO, newTime) {
 
   return { ok: true, guestName, telegramId, newEntry, newDisplayText };
 }
+
+// ─── ВНУТРЕННИЕ ЭНДПОИНТЫ ДЛЯ ПАНЕЛИ СТАФ-ПРИЛОЖЕНИЯ ──
+// Стаф-бэкенд (другой бот, свой PIN) не может сам написать гостю — у него нет
+// чата с гостевым ботом. Поэтому подтверждение/отмена/перенос брони из панели
+// идут сюда: здесь и пишем в Notion, и (если получится) шлём гостю то же
+// сообщение, что и при нажатии кнопки в Telegram. Отвечаем { ok, notified } —
+// notified:false означает "в Notion записалось, а гостю не долетело", чтобы
+// админ не думал, что гость точно предупреждён, если это не так.
+
+function checkInternalKey(req, res) {
+  if (!INTERNAL_ADMIN_KEY || req.headers['x-internal-key'] !== INTERNAL_ADMIN_KEY) {
+    res.status(401).json({ error: 'unauthorized' });
+    return false;
+  }
+  return true;
+}
+
+app.post('/api/internal/booking/confirm', async (req, res) => {
+  if (!checkInternalKey(req, res)) return;
+  const { phone: rawPhone, entry } = req.body;
+  const phone = normalizePhone(rawPhone);
+  if (!phone || !entry) return res.status(400).json({ error: 'phone and entry required' });
+
+  try {
+    const result = await confirmBookingInternal(phone, entry);
+    if (!result.ok) return res.status(404).json({ error: 'guest not found' });
+
+    const guest = await findGuestByPhone(phone);
+    const telegramId = guest?.properties?.['Telegram ID']?.rich_text?.[0]?.plain_text;
+    let notified = false;
+    if (telegramId) {
+      const sent = await sendTelegramMessage(telegramId, `🎉 Бронь подтверждена! Ждём вас.\n\n🗓 ${displayEntry(entry)}`);
+      notified = !!(sent && sent.ok);
+    }
+    res.json({ ok: true, notified });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to confirm' });
+  }
+});
+
+app.post('/api/internal/booking/cancel', async (req, res) => {
+  if (!checkInternalKey(req, res)) return;
+  const { phone: rawPhone, entry, message } = req.body;
+  const phone = normalizePhone(rawPhone);
+  if (!phone || !entry) return res.status(400).json({ error: 'phone and entry required' });
+
+  try {
+    const result = await cancelBookingInternal(phone, entry, message);
+    if (!result.ok) return res.status(404).json({ error: 'guest not found' });
+    res.json({ ok: true, notified: !!result.telegramId });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to cancel' });
+  }
+});
+
+app.post('/api/internal/booking/edit', async (req, res) => {
+  if (!checkInternalKey(req, res)) return;
+  const { phone: rawPhone, entry, dateISO, time, guests, comment } = req.body;
+  const phone = normalizePhone(rawPhone);
+  if (!phone || !entry || !dateISO || !time) {
+    return res.status(400).json({ error: 'phone, entry, dateISO and time required' });
+  }
+
+  try {
+    const result = await editBookingInternal(phone, entry, dateISO, time, guests, comment);
+    if (!result.ok) return res.status(404).json({ error: 'guest not found' });
+
+    let notified = false;
+    if (result.telegramId) {
+      const sent = await sendTelegramMessage(
+        result.telegramId,
+        `Бронь изменена администратором.\n\n🗓 Новое время: ${result.newDisplayText}\n\nЖдём вас!`
+      );
+      notified = !!(sent && sent.ok);
+    }
+    res.json({ ok: true, notified, newEntry: result.newEntry, newDisplayText: result.newDisplayText });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to edit' });
+  }
+});
 
 // ─── BOOKING → GUESTS DB + УВЕДОМЛЕНИЯ ────────────
 
@@ -447,8 +554,10 @@ app.post('/api/booking', async (req, res) => {
     const uid = crypto.randomUUID().slice(0, 8); // делает каждую бронь уникальной, даже если дата/время/тип совпали с прошлой
 
     const isoTime = time && /^\d{2}:\d{2}$/.test(time) ? time : '00:00';
-    const isoDateTime = dateISO ? `${dateISO}T${isoTime}:00` : null;
-    const bookingEntry = isoDateTime ? `${isoDateTime}|${displayText}|${kind}|${uid}` : `${displayText}|${kind}|${uid}`;
+    const isoDateTime = dateISO ? `${dateISO}T${isoTime}:00` : '';
+    const guestsField = guests ? String(guests).replace(/\D/g, '').slice(0, 4) : '';
+    const commentField = sanitizeBookingComment(comment);
+    const bookingEntry = `${isoDateTime}|${displayText}|${kind}|${uid}|${guestsField}|${commentField}`;
 
     const properties = {};
     if (telegramId) properties['Telegram ID'] = { rich_text: [{ text: { content: String(telegramId) } }] };
