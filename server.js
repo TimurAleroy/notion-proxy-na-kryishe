@@ -220,6 +220,49 @@ app.get('/api/menu', async (req, res) => {
   }
 });
 
+// Аватарка гостя в шапке/профиле мини-аппы. Не полагаемся только на initDataUnsafe.user.photo_url —
+// это значение приходит от Telegram-клиента и может подолгу не обновляться после смены фото
+// (тот же эффект кэширования WebView, что и с другими полями initData). Поэтому здесь же
+// дополнительно спрашиваем актуальное фото напрямую у Bot API: getUserProfilePhotos → getFile.
+const guestOwnPhotoCache = new Map(); // telegramId -> { url, expiresAt }
+const GUEST_OWN_PHOTO_FOUND_TTL = 5 * 60 * 1000;  // 5 минут
+const GUEST_OWN_PHOTO_EMPTY_TTL = 30 * 60 * 1000; // 30 минут — если фото нет, не дёргаем API часто
+
+async function fetchGuestOwnPhotoUrl(telegramId) {
+  if (!telegramId || !TELEGRAM_BOT_TOKEN) return null;
+
+  const cached = guestOwnPhotoCache.get(telegramId);
+  if (cached && cached.expiresAt > Date.now()) return cached.url;
+
+  const photos = await tgApi('getUserProfilePhotos', { user_id: telegramId, limit: 1 });
+  const firstSet = photos?.result?.photos?.[0];
+  if (!firstSet || !firstSet.length) {
+    guestOwnPhotoCache.set(telegramId, { url: null, expiresAt: Date.now() + GUEST_OWN_PHOTO_EMPTY_TTL });
+    return null;
+  }
+
+  const fileId = firstSet[firstSet.length - 1].file_id; // последний элемент — самый крупный размер
+  const fileInfo = await tgApi('getFile', { file_id: fileId });
+  const filePath = fileInfo?.result?.file_path;
+  if (!filePath) return null;
+
+  const url = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${filePath}`;
+  guestOwnPhotoCache.set(telegramId, { url, expiresAt: Date.now() + GUEST_OWN_PHOTO_FOUND_TTL });
+  return url;
+}
+
+app.get('/api/guest/photo', async (req, res) => {
+  const telegramId = req.query.telegramId;
+  if (!telegramId) return res.json({ photoUrl: null });
+  try {
+    const photoUrl = await fetchGuestOwnPhotoUrl(String(telegramId));
+    res.json({ photoUrl });
+  } catch (error) {
+    console.error('Guest own photo fetch failed:', error);
+    res.json({ photoUrl: null }); // не критично — останется аватар из initData или инициал
+  }
+});
+
 function reviewDeadline(days) {
   const d = new Date();
   d.setDate(d.getDate() + days);
