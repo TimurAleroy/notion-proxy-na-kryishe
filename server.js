@@ -204,13 +204,18 @@ app.get('/api/menu', async (req, res) => {
     }
     const items = (data.results || []).map(p => {
       const props = p.properties;
+      const file = props['Фото']?.files?.[0] || null;
+      // Файл, загруженный прямо в Notion, отдаёт временную ссылку (~1 час) — это ок,
+      // т.к. гость получает её заново при каждом открытии меню. Внешняя ссылка (url) бессрочная.
+      const photoUrl = file ? (file.file?.url || file.external?.url || null) : null;
       return {
         id: p.id,
         name: props['Название']?.title?.[0]?.plain_text || '',
         category: props['Категория']?.select?.name || '',
         subcategory: props['Подкатегория']?.select?.name || '',
         price: props['Цена']?.number ?? null,
-        description: props['Описание']?.rich_text?.[0]?.plain_text || ''
+        description: props['Описание']?.rich_text?.[0]?.plain_text || '',
+        photoUrl
       };
     });
     res.json(items);
@@ -1096,7 +1101,7 @@ app.post('/telegram-webhook', async (req, res) => {
 
         const noSpotsMessage =
           `К сожалению, свободных мест на это время уже не осталось — вечер собрал больше гостей, чем мы ожидали.\n\n` +
-          `Ваша бронь отменена, но Крыша никуда не денется: выберите другое время, и мы позаботимся, чтобы вечер получился особенным.`;
+          `Ваша бронь отменена, но крыша никуда не денётся: выберите другое время, и мы позаботимся, чтобы вечер получился особенным.`;
         const cancelMessage = record.confirmed ? null : noSpotsMessage;
         await cancelBookingInternal(record.phone, record.entry, cancelMessage);
         bookingsMap.delete(bookingId);
