@@ -1096,7 +1096,7 @@ app.post('/telegram-webhook', async (req, res) => {
 
         const noSpotsMessage =
           `К сожалению, свободных мест на это время уже не осталось — вечер собрал больше гостей, чем мы ожидали.\n\n` +
-          `Ваша бронь отменена, но крыша никуда не денётся: выберите другое время, и мы позаботимся, чтобы вечер получился особенным.`;
+          `Ваша бронь отменена, но Крыша никуда не денется: выберите другое время, и мы позаботимся, чтобы вечер получился особенным.`;
         const cancelMessage = record.confirmed ? null : noSpotsMessage;
         await cancelBookingInternal(record.phone, record.entry, cancelMessage);
         bookingsMap.delete(bookingId);
