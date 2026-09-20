@@ -71,11 +71,15 @@ function stripSuffix(raw) {
 function sanitizeBookingComment(s) {
   return String(s || '').replace(/[|,]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
 }
+// То же самое, но короче — для названия стола ("Терраса 3" и т.п.).
+function sanitizeTableLabel(s) {
+  return String(s || '').replace(/[|,]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+}
 function parseEntry(raw) {
   const clean = stripSuffix(raw);
   const parts = clean.split('|');
   if (parts.length === 1) {
-    return { iso: null, display: parts[0], kind: 'table', uid: null, guests: null, comment: '' };
+    return { iso: null, display: parts[0], kind: 'table', uid: null, guests: null, comment: '', table: '' };
   }
   return {
     iso: parts[0] || null,
@@ -83,7 +87,10 @@ function parseEntry(raw) {
     kind: parts[2] || 'table',
     uid: parts[3] || null,
     guests: parts[4] ? (Number(parts[4]) || null) : null,
-    comment: parts[5] || ''
+    comment: parts[5] || '',
+    // Номер/название физического стола, который персонал назначил брони —
+    // 7-е поле, добавленное позже; у старых записей его нет, тогда просто ''.
+    table: parts[6] || ''
   };
 }
 function displayEntry(raw) {
@@ -477,7 +484,8 @@ async function editBookingInternal(phone, oldEntry, newDateISO, newTime, newGues
   // Если гостей/комментарий не передали явно — сохраняем то, что было в старой записи
   const guestsOut = newGuests !== undefined && newGuests !== null ? String(newGuests).replace(/\D/g, '').slice(0, 4) : (parsed.guests !== null ? String(parsed.guests) : '');
   const commentOut = newComment !== undefined ? sanitizeBookingComment(newComment) : (parsed.comment || '');
-  const newEntry = `${newIsoDateTime}|${newDisplayText}|${parsed.kind}|${parsed.uid}|${guestsOut}|${commentOut}`;
+  // Стол при обычном редактировании (дата/время/гости/комментарий) не трогаем — сохраняем как был.
+  const newEntry = `${newIsoDateTime}|${newDisplayText}|${parsed.kind}|${parsed.uid}|${guestsOut}|${commentOut}|${parsed.table || ''}`;
 
   const updatedEntries = entries.map(e => stripSuffix(e) === oldEntry ? `${newEntry} (подтверждено)` : e);
   const newHistory = updatedEntries.join(', ');
@@ -496,6 +504,101 @@ async function editBookingInternal(phone, oldEntry, newDateISO, newTime, newGues
   const telegramId = props['Telegram ID']?.rich_text?.[0]?.plain_text;
 
   return { ok: true, guestName, telegramId, newEntry, newDisplayText };
+}
+
+// Назначаем/меняем физический стол у брони — это чисто внутренняя пометка для
+// персонала (куда сажать гостя), не связана со статусом подтверждения и не
+// требует уведомления гостя, поэтому Telegram-сообщение сюда не шлём.
+async function assignTableInternal(phone, entry, table) {
+  const guest = await findGuestByPhone(phone);
+  if (!guest) return { ok: false };
+
+  const props = guest.properties;
+  const historyText = props['История броней']?.rich_text?.[0]?.plain_text || '';
+  const entries = historyText.split(',').map(s => s.trim());
+  const cleanTable = sanitizeTableLabel(table);
+
+  let matchedNewEntry = null;
+  const updatedEntries = entries.map(e => {
+    if (stripSuffix(e) !== entry) return e;
+    const suffix = e.includes(' (подтверждено)') ? ' (подтверждено)' : (e.includes(' (отменено)') ? ' (отменено)' : '');
+    const parsed = parseEntry(e);
+    const guestsOut = parsed.guests !== null ? String(parsed.guests) : '';
+    const newBase = `${parsed.iso || ''}|${parsed.display}|${parsed.kind}|${parsed.uid || ''}|${guestsOut}|${parsed.comment || ''}|${cleanTable}`;
+    matchedNewEntry = newBase;
+    return `${newBase}${suffix}`;
+  });
+
+  if (!matchedNewEntry) return { ok: false, notFound: true };
+
+  const newHistory = updatedEntries.join(', ');
+  await fetchWithTimeout(`https://api.notion.com/v1/pages/${guest.id}`, {
+    method: 'PATCH',
+    headers: NOTION_HEADERS,
+    body: JSON.stringify({
+      properties: {
+        'История броней': { rich_text: [{ text: { content: newHistory.slice(0, 1900) } }] }
+      }
+    })
+  });
+
+  return { ok: true, newEntry: matchedNewEntry };
+}
+
+// Вносим бронь вручную (гость позвонил и договорился по телефону) — от лица
+// персонала, а не гостя из мини-аппа. В отличие от /api/booking, сразу
+// помечаем запись как подтверждённую (сотрудник уже поговорил с гостём) и
+// используем свой Источник ("Телефон"), чтобы потом можно было отличить канал.
+async function createManualBookingInternal({ name, phone: rawPhone, dateISO, time, guests, comment, table }) {
+  const phone = normalizePhone(rawPhone);
+  const existing = await findGuestByPhone(phone);
+
+  const displayText = `${formatDateRu(dateISO)} ${time}`;
+  const kind = 'table';
+  const uid = crypto.randomUUID().slice(0, 8);
+  const isoTime = /^\d{2}:\d{2}$/.test(time) ? time : '00:00';
+  const isoDateTime = `${dateISO}T${isoTime}:00`;
+  const guestsField = guests ? String(guests).replace(/\D/g, '').slice(0, 4) : '';
+  const commentField = sanitizeBookingComment(comment);
+  const tableField = sanitizeTableLabel(table);
+  const bookingEntry = `${isoDateTime}|${displayText}|${kind}|${uid}|${guestsField}|${commentField}|${tableField}`;
+  const confirmedEntry = `${bookingEntry} (подтверждено)`;
+
+  if (existing) {
+    const props = existing.properties;
+    const currentCount = props['Количество броней']?.number || 0;
+    const existingHistory = props['История броней']?.rich_text?.[0]?.plain_text || '';
+    const newHistory = existingHistory ? `${existingHistory}, ${confirmedEntry}` : confirmedEntry;
+
+    await fetchWithTimeout(`https://api.notion.com/v1/pages/${existing.id}`, {
+      method: 'PATCH',
+      headers: NOTION_HEADERS,
+      body: JSON.stringify({
+        properties: {
+          'Количество броней': { number: currentCount + 1 },
+          'История броней': { rich_text: [{ text: { content: newHistory.slice(0, 1900) } }] }
+        }
+      })
+    });
+  } else {
+    const properties = {
+      'Имя': { title: [{ text: { content: name } }] },
+      'Телефон': { phone_number: phone },
+      'Источник': { select: { name: 'Телефон' } },
+      'Дата первого контакта': { date: { start: new Date().toISOString().split('T')[0] } },
+      'Количество броней': { number: 1 },
+      'История броней': { rich_text: [{ text: { content: confirmedEntry } }] },
+      'Перенесён в Карточку Гостя': { checkbox: false }
+    };
+
+    await fetchWithTimeout('https://api.notion.com/v1/pages', {
+      method: 'POST',
+      headers: NOTION_HEADERS,
+      body: JSON.stringify({ parent: { database_id: NOTION_GUESTS_DB_ID }, properties })
+    });
+  }
+
+  return { ok: true, entry: bookingEntry, display: displayText };
 }
 
 // ─── ВНУТРЕННИЕ ЭНДПОИНТЫ ДЛЯ ПАНЕЛИ СТАФ-ПРИЛОЖЕНИЯ ──
@@ -578,6 +681,38 @@ app.post('/api/internal/booking/edit', async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to edit' });
+  }
+});
+
+app.post('/api/internal/booking/create', async (req, res) => {
+  if (!checkInternalKey(req, res)) return;
+  const { name, phone, dateISO, time, guests, comment, table } = req.body;
+  if (!name || !phone || !dateISO || !time) {
+    return res.status(400).json({ error: 'name, phone, dateISO and time required' });
+  }
+
+  try {
+    const result = await createManualBookingInternal({ name, phone, dateISO, time, guests, comment, table });
+    res.json({ ok: true, entry: result.entry, display: result.display });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to create booking' });
+  }
+});
+
+app.post('/api/internal/booking/table', async (req, res) => {
+  if (!checkInternalKey(req, res)) return;
+  const { phone: rawPhone, entry, table } = req.body;
+  const phone = normalizePhone(rawPhone);
+  if (!phone || !entry) return res.status(400).json({ error: 'phone and entry required' });
+
+  try {
+    const result = await assignTableInternal(phone, entry, table);
+    if (!result.ok) return res.status(404).json({ error: result.notFound ? 'booking not found' : 'guest not found' });
+    res.json({ ok: true, newEntry: result.newEntry });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to assign table' });
   }
 });
 
@@ -1101,7 +1236,7 @@ app.post('/telegram-webhook', async (req, res) => {
 
         const noSpotsMessage =
           `К сожалению, свободных мест на это время уже не осталось — вечер собрал больше гостей, чем мы ожидали.\n\n` +
-          `Ваша бронь отменена, но крыша никуда не денётся: выберите другое время, и мы позаботимся, чтобы вечер получился особенным.`;
+          `Ваша бронь отменена, но Крыша никуда не денётся: выберите другое время, и мы позаботимся, чтобы вечер получился особенным.`;
         const cancelMessage = record.confirmed ? null : noSpotsMessage;
         await cancelBookingInternal(record.phone, record.entry, cancelMessage);
         bookingsMap.delete(bookingId);
