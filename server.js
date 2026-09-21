@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const fetch = require('node-fetch');
 
 const app = express();
@@ -7,32 +8,19 @@ app.use(cors());
 app.use(express.json());
 
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
-const NOTION_GUESTS_DB_ID = '35173a7166368022bf60d76141cca681'; // Карточка Гостя
-const NOTION_VISITS_DB_ID = 'f384e676a0d7477bb45a34707bcb0dff'; // Визиты
+const NOTION_EVENTS_DB_ID = '35173a71663680999ebcf882ecea022d';
+const NOTION_GUESTS_DB_ID = 'f25cd3eb7e8441f2ada6bdd20700c4d6';
+const NOTION_REVIEWS_DB_ID = '994a20a76308436683487de6593747fb'; // Отзывы CSI
 const NOTION_PROBLEMS_DB_ID = '88be90a6768e4c9da2819565e1a69f62'; // Проблемы
-const NOTION_REVIEWS_DB_ID = '994a20a76308436683487de6593747fb'; // Отзывы CSI (заполняется гостевым приложением)
-const NOTION_ENPS_DB_ID = 'bb06232232d44950842790033109f8ba'; // Отзывы eNPS — полностью анонимно, без привязки к сотруднику
-const NOTION_EVENTS_DB_ID = '35173a71663680999ebcf882ecea022d'; // Журнал Мероприятий
-const NOTION_GENERAL_GUESTS_DB_ID = 'f25cd3eb7e8441f2ada6bdd20700c4d6'; // Общая база гостей (из гостевого мини-аппа)
-const NOTION_EMPLOYEES_DB_ID = '56fb72e9a9244998828c1d8d3cb9b381'; // Сотрудники — именные PIN-коды
-const NOTION_SCHEDULE_DB_ID = '34d1765f8cd64ed0abc3838096a22066'; // График смен — замена Supershift
-const NOTION_MENU_DB_ID = '4640c3e50a71422e8d61830c060f52c8'; // Меню — тот же источник, что и в гостевом приложении
-
-// Кто может снимать/возвращать позицию своей категории с "В наличии".
-// Администратор — всегда, независимо от категории.
-const MENU_CATEGORY_EDIT_ROLE = {
-  'Напитки': 'Бармен',
-  'Коктейли': 'Бармен',
-  'Алкоголь': 'Бармен',
-  'Еда': 'Повар',
-  'Кальян': 'КМ'
-};
-function canEditMenuCategory(employeeRole, category) {
-  return employeeRole === 'Администратор' || MENU_CATEGORY_EDIT_ROLE[category] === employeeRole;
-}
+const NOTION_MENU_DB_ID = '4640c3e50a71422e8d61830c060f52c8'; // Меню — общий источник с стоп-листом персонала
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || '188483198';
-const WEBAPP_URL = 'https://timuraleroy.github.io/na-kryishe-staff';
+// Общий секрет со стаф-бэкендом (staff-proxy-na-kryishe) — нужен, чтобы панель
+// управления в стаф-приложении могла подтверждать/отменять/переносить брони
+// и при этом гость получал то же автосообщение, что и при подтверждении через
+// кнопки в этом Telegram-боте. Без него /api/internal/* просто отвечает 401.
+const INTERNAL_ADMIN_KEY = process.env.INTERNAL_ADMIN_KEY;
+const WEBAPP_URL = 'https://timuraleroy.github.io/na-kryishe';
 const PORT = process.env.PORT || 3000;
 
 const NOTION_HEADERS = {
@@ -41,25 +29,25 @@ const NOTION_HEADERS = {
   'Content-Type': 'application/json'
 };
 
-// Сервер (Railway) работает по UTC, а заведение — по владикавказскому времени (UTC+3, без перевода часов).
-// Простое new Date().toISOString() примерно 3 часа в сутки (00:00–03:00 по-местному) даёт "вчера" вместо "сегодня".
-// Эти хелперы всегда возвращают дату/время именно по Владикавказу.
-const VENUE_TZ = 'Europe/Moscow'; // тот же часовой пояс, что и Владикавказ
-
-function venueDateStr(date = new Date()) {
-  // Возвращает "YYYY-MM-DD" по местному времени заведения
-  return new Intl.DateTimeFormat('en-CA', { timeZone: VENUE_TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
-}
-function venueMonthDay(date = new Date()) {
-  // "MM-DD" — для сравнения дней рождения
-  return venueDateStr(date).slice(5, 10);
-}
-function venueTimeStr(date = new Date()) {
-  // Человекочитаемое время для сообщений в Telegram
-  return date.toLocaleString('ru-RU', { timeZone: VENUE_TZ, hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'long' });
+// Обычный fetch() в Node не имеет ограничения по времени — если Notion или Telegram
+// на секунду "зависнут", запрос может висеть буквально минутами. Эта обёртка
+// прерывает запрос по таймауту, чтобы сервер никогда не зависал целиком.
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
-// Приводим номер к единому виду для сравнения — только цифры, с ведущим +7
+// Временное хранилище данных о брони для кнопок в Telegram (id → детали)
+const bookingsMap = new Map();
+// Ждём от админа новую дату/время после нажатия "Изменить" — chatId → { bookingId, messageId }
+const pendingEdits = new Map();
+
+// Приводим номер к единому виду: только цифры, с ведущим +7
 function normalizePhone(raw) {
   if (!raw) return '';
   let digits = raw.replace(/[^\d+]/g, '');
@@ -69,1287 +57,26 @@ function normalizePhone(raw) {
   return digits;
 }
 
-// ─── ИМЕННЫЕ СОТРУДНИКИ (кэш в памяти, обновляется раз в 5 минут) ──
-// Вместо общего PIN на всех — у каждого сотрудника свой код в базе "Сотрудники".
-// Уволили/поменяли роль — просто правим строку в Notion, код обновится сам.
-
-let employeesCache = [];
-let employeesCacheTime = 0;
-const EMPLOYEES_CACHE_TTL = 5 * 60 * 1000; // 5 минут
-
-async function refreshEmployees() {
-  try {
-    const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_EMPLOYEES_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ filter: { property: 'Активен', checkbox: { equals: true } } })
-    });
-    const data = await r.json();
-    employeesCache = (data.results || [])
-      .map(e => ({
-        id: e.id,
-        name: e.properties['Имя']?.title?.[0]?.plain_text || '',
-        pin: e.properties['PIN']?.rich_text?.[0]?.plain_text || '',
-        role: e.properties['Роль']?.select?.name || '',
-        telegramId: e.properties['Telegram ID']?.rich_text?.[0]?.plain_text || ''
-      }))
-      .filter(e => e.pin); // без PIN сотрудник не может войти
-    employeesCacheTime = Date.now();
-  } catch (err) {
-    console.error('Не удалось обновить список сотрудников:', err);
-  }
-}
-
-async function ensureEmployeesFresh() {
-  if (Date.now() - employeesCacheTime > EMPLOYEES_CACHE_TTL) {
-    await refreshEmployees();
-  }
-}
-
-function findEmployeeByPin(pin) {
-  return employeesCache.find(e => e.pin === pin);
-}
-
-// Любой активный сотрудник — базовый доступ
-async function checkPin(req, res) {
-  await ensureEmployeesFresh();
-  const pin = req.query.pin || req.body?.pin;
-  const employee = findEmployeeByPin(pin);
-  if (!employee) {
-    res.status(401).json({ error: 'Неверный PIN-код' });
-    return false;
-  }
-  req.employee = employee;
-  return true;
-}
-
-// Только роль "Администратор" — функции управляющего
-async function checkAdminPin(req, res) {
-  await ensureEmployeesFresh();
-  const pin = req.query.pin || req.body?.pin;
-  const employee = findEmployeeByPin(pin);
-  if (!employee || employee.role !== 'Администратор') {
-    res.status(403).json({ error: 'Доступно только администратору' });
-    return false;
-  }
-  req.employee = employee;
-  return true;
-}
-
-refreshEmployees(); // загружаем список сразу при старте сервера
-setInterval(refreshEmployees, EMPLOYEES_CACHE_TTL);
-
-// ─── НАПОМИНАНИЯ О ПРОСРОЧЕННЫХ ПРОБЛЕМАХ ──────────
-// Раз в несколько часов проверяем "В работе" с истёкшим сроком — шлём
-// ответственному (по роли) и админу. Не чаще одного раза в день на проблему.
-
-const remindedToday = new Set(); // "problemId_YYYY-MM-DD"
-
-async function checkOverdueProblems() {
-  try {
-    await ensureEmployeesFresh();
-    const today = venueDateStr();
-    const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_PROBLEMS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({
-        filter: {
-          and: [
-            { property: 'Статус', select: { equals: 'В работе' } },
-            { property: 'Срок исполнения', date: { before: today } }
-          ]
-        }
-      })
-    });
-    const data = await r.json();
-
-    for (const page of data.results || []) {
-      const key = `${page.id}_${today}`;
-      if (remindedToday.has(key)) continue;
-
-      const props = page.properties;
-      const title = props['Проблема']?.title?.[0]?.plain_text || 'Проблема';
-      const responsibleRole = props['Ответственный']?.rich_text?.[0]?.plain_text || '';
-      const deadline = props['Срок исполнения']?.date?.start || '';
-
-      const text = `⏰ Просрочена проблема: «${title}»\nОтветственный: ${responsibleRole}\nСрок был: ${deadline}\n\nПожалуйста, закройте или обновите срок.`;
-
-      // Шлём каждому активному сотруднику с нужной ролью, у кого есть Telegram ID
-      const responsibleEmployees = employeesCache.filter(e => e.role === responsibleRole);
-      for (const emp of responsibleEmployees) {
-        if (emp.telegramId) await sendTelegramMessage(emp.telegramId, text);
-      }
-      await sendTelegramMessage(ADMIN_CHAT_ID, text);
-
-      remindedToday.add(key);
-    }
-  } catch (err) {
-    console.error('Overdue problems check failed:', err);
-  }
-}
-
-setInterval(checkOverdueProblems, 6 * 60 * 60 * 1000); // каждые 6 часов
-setTimeout(checkOverdueProblems, 30 * 1000); // и один раз вскоре после старта сервера
-
-async function tgApi(method, payload) {
-  if (!TELEGRAM_BOT_TOKEN) return null;
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    return await res.json();
-  } catch (err) {
-    console.error(`Telegram API ${method} failed:`, err);
-    return null;
-  }
-}
-
-async function sendTelegramMessage(chatId, text) {
-  return tgApi('sendMessage', { chat_id: chatId, text });
-}
-
-// ─── ПРОВЕРКА PIN ──────────────────────────────────
-
-app.post('/api/staff/login', async (req, res) => {
-  await ensureEmployeesFresh();
-  const pin = req.body?.pin;
-  const employee = findEmployeeByPin(pin);
-  if (!employee) return res.status(401).json({ error: 'Неверный PIN-код' });
-
-  const isAdmin = employee.role === 'Администратор';
-  res.json({ ok: true, role: isAdmin ? 'admin' : 'staff', name: employee.name, jobRole: employee.role });
-});
-
-// ─── ИМЕНИННИКИ СЕГОДНЯ ─────────────────────────────
-
-app.get('/api/staff/birthdays', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  try {
-    const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_GUESTS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ filter: { property: 'Дата рождения', date: { is_not_empty: true } } })
-    });
-    const data = await r.json();
-    const todayMonthDay = venueMonthDay(); // MM-DD, по местному времени
-
-    const birthdays = (data.results || [])
-      .filter(g => {
-        const bday = g.properties['Дата рождения']?.date?.start;
-        return bday && bday.slice(5, 10) === todayMonthDay;
-      })
-      .map(g => ({
-        id: g.id,
-        name: g.properties['Имя Гостя']?.title?.[0]?.plain_text || '',
-        phone: g.properties['Телефон']?.phone_number || '',
-        status: g.properties['Частота визитов']?.select?.name || ''
-      }));
-
-    res.json(birthdays);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to fetch birthdays' });
-  }
-});
-
-// ─── ГОСТИ ПО СТАТУСУ (например все VIP) ────────────
-
-app.get('/api/staff/guests-by-status', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  const status = req.query.status;
-  if (!status) return res.status(400).json({ error: 'status required' });
-
-  try {
-    const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_GUESTS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({
-        filter: { property: 'Частота визитов', select: { equals: status } },
-        sorts: [{ property: 'Имя Гостя', direction: 'ascending' }]
-      })
-    });
-    const data = await r.json();
-    const guests = (data.results || []).map(g => ({
-      id: g.id,
-      name: g.properties['Имя Гостя']?.title?.[0]?.plain_text || '',
-      phone: g.properties['Телефон']?.phone_number || ''
-    }));
-    res.json(guests);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to fetch guests by status' });
-  }
-});
-
-// ─── ГОСТИ, КОТОРЫХ ДАВНО НЕ БЫЛО (30+ дней) ────────
-
-app.get('/api/staff/inactive-guests', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
-  const thresholdDays = 30;
-
-  try {
-    // Берём только VIP и Постоянных — для "Редких" отсутствие визитов не сигнал
-    const guestsRes = await fetch(`https://api.notion.com/v1/databases/${NOTION_GUESTS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({
-        filter: { or: [
-          { property: 'Частота визитов', select: { equals: 'VIP' } },
-          { property: 'Частота визитов', select: { equals: 'Постоянный' } }
-        ]}
-      })
-    });
-    const guestsData = await guestsRes.json();
-    const guests = guestsData.results || [];
-
-    // Один запрос по всем визитам, группируем по гостю локально — быстрее чем по одному запросу на гостя
-    const visitsRes = await fetch(`https://api.notion.com/v1/databases/${NOTION_VISITS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ sorts: [{ property: 'Дата', direction: 'descending' }], page_size: 100 })
-    });
-    const visitsData = await visitsRes.json();
-    const lastVisitByGuest = {};
-    for (const v of visitsData.results || []) {
-      const guestId = v.properties['Гость']?.relation?.[0]?.id;
-      const date = v.properties['Дата']?.date?.start;
-      if (guestId && date && !lastVisitByGuest[guestId]) lastVisitByGuest[guestId] = date;
-    }
-
-    const now = new Date();
-    const inactive = [];
-    for (const g of guests) {
-      const lastVisit = lastVisitByGuest[g.id];
-      const daysSince = lastVisit
-        ? Math.floor((now - new Date(lastVisit)) / (1000 * 60 * 60 * 24))
-        : null; // визитов вообще не было записано
-
-      if (daysSince === null || daysSince >= thresholdDays) {
-        inactive.push({
-          id: g.id,
-          name: g.properties['Имя Гостя']?.title?.[0]?.plain_text || '',
-          phone: g.properties['Телефон']?.phone_number || '',
-          status: g.properties['Частота визитов']?.select?.name || '',
-          lastVisit: lastVisit || null,
-          daysSince
-        });
-      }
-    }
-
-    inactive.sort((a, b) => (b.daysSince || 999) - (a.daysSince || 999));
-    res.json(inactive);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to fetch inactive guests' });
-  }
-});
-
-// ─── БЫСТРАЯ ЗАМЕТКА О ПРОБЛЕМЕ (от любого сотрудника) ──
-
-app.post('/api/staff/problem', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  const { category, comment, severity } = req.body;
-  if (!category || !comment) return res.status(400).json({ error: 'category and comment required' });
-
-  const responsibleRole = CATEGORY_ROLE_MAP[category] || 'Администратор';
-  const finalSeverity = severity || 'Средняя';
-
-  try {
-    await fetch('https://api.notion.com/v1/pages', {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({
-        parent: { database_id: NOTION_PROBLEMS_DB_ID },
-        properties: {
-          'Проблема': { title: [{ text: { content: `${category} — сообщено сотрудником` } }] },
-          'Категория': { select: { name: category } },
-          'Комментарий гостя': { rich_text: [{ text: { content: comment } }] },
-          'Дата отзыва': { date: { start: venueDateStr() } },
-          'Статус': { select: { name: 'Задачи' } },
-          'Критичность': { select: { name: finalSeverity } },
-          'Ответственный': { rich_text: [{ text: { content: responsibleRole } }] },
-          'Срок исполнения': { date: { start: defaultDeadline(finalSeverity) } }
-        }
-      })
-    });
-    res.json({ ok: true });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to create problem' });
-  }
-});
-
-// ─── ЧЕК-ЛИСТ СМЕНЫ (админ) ─────────────────────────
-
-app.post('/api/staff/checklist-complete', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  const { type, items } = req.body; // type: 'Открытие' | 'Закрытие'
-  const employee = req.employee; // теперь известно кто именно заполнил, из PIN
-
-  const time = venueTimeStr();
-  const itemsList = (items || []).map(i => `✓ ${i}`).join('\n');
-
-  await sendTelegramMessage(
-    ADMIN_CHAT_ID,
-    `📋 Чек-лист «${employee.role} · ${type}» выполнен — ${employee.name} — ${time}\n\n${itemsList}`
-  );
-  res.json({ ok: true });
-});
-
-// ─── ПОИСК ГОСТЯ ───────────────────────────────────
-
-app.get('/api/staff/search', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  const name = req.query.name;
-  if (!name) return res.status(400).json({ error: 'name required' });
-
-  try {
-    const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_GUESTS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ filter: { property: 'Имя Гостя', title: { contains: name } } })
-    });
-    const data = await r.json();
-    const results = (data.results || []).map(g => ({
-      id: g.id,
-      name: g.properties['Имя Гостя']?.title?.[0]?.plain_text || '',
-      phone: g.properties['Телефон']?.phone_number || ''
-    }));
-    res.json(results);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Search failed' });
-  }
-});
-
-// ─── ПРОВЕРКА ОБЩЕЙ БАЗЫ (гостевой мини-апп) ────────
-// Используется когда в "Карточке Гостя" никого не нашли — вдруг человек уже бронировал через эп
-
-app.get('/api/staff/check-general', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  const name = req.query.name;
-  if (!name) return res.status(400).json({ error: 'name required' });
-
-  try {
-    const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_GENERAL_GUESTS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ filter: { property: 'Имя', title: { contains: name } } })
-    });
-    const data = await r.json();
-    const results = (data.results || []).map(g => ({
-      name: g.properties['Имя']?.title?.[0]?.plain_text || '',
-      phone: g.properties['Телефон']?.phone_number || '',
-      bookingsCount: g.properties['Количество броней']?.number || 0,
-      source: g.properties['Источник']?.select?.name || ''
-    }));
-    res.json(results);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Check failed' });
-  }
-});
-
-// ─── ПОИСК ПО ТЕЛЕФОНУ (сразу по обеим базам) ──────
-// Надёжнее поиска по имени — имя гость мог указать неточно, а номер уникален
-
-app.get('/api/staff/search-by-phone', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  const rawPhone = req.query.phone;
-  if (!rawPhone) return res.status(400).json({ error: 'phone required' });
-  const phone = normalizePhone(rawPhone);
-
-  try {
-    // 1. Ищем в "Карточке Гостя" — если найден, это самое ценное совпадение
-    const cardRes = await fetch(`https://api.notion.com/v1/databases/${NOTION_GUESTS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ filter: { property: 'Телефон', phone_number: { equals: phone } } })
-    });
-    const cardData = await cardRes.json();
-    const cardMatch = cardData.results?.[0];
-
-    if (cardMatch) {
-      return res.json({
-        inCardDb: true,
-        id: cardMatch.id,
-        name: cardMatch.properties['Имя Гостя']?.title?.[0]?.plain_text || ''
-      });
-    }
-
-    // 2. Не найден в карточках — проверяем общую базу (брони через мини-апп)
-    const genRes = await fetch(`https://api.notion.com/v1/databases/${NOTION_GENERAL_GUESTS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ filter: { property: 'Телефон', phone_number: { equals: phone } } })
-    });
-    const genData = await genRes.json();
-    const genMatch = genData.results?.[0];
-
-    if (genMatch) {
-      return res.json({
-        inCardDb: false,
-        inGeneralDb: true,
-        name: genMatch.properties['Имя']?.title?.[0]?.plain_text || '',
-        phone: genMatch.properties['Телефон']?.phone_number || phone,
-        bookingsCount: genMatch.properties['Количество броней']?.number || 0
-      });
-    }
-
-    res.json({ inCardDb: false, inGeneralDb: false });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Search by phone failed' });
-  }
-});
-
-// Notion не умеет фильтровать телефон "оканчивается на" — выгружаем всех с телефоном
-// постранично и сравниваем последние цифры на сервере
-async function fetchAllWithPhone(dbId) {
-  let all = [];
-  let cursor = undefined;
-  do {
-    const body = {
-      filter: { property: 'Телефон', phone_number: { is_not_empty: true } },
-      page_size: 100
-    };
-    if (cursor) body.start_cursor = cursor;
-    const r = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify(body)
-    });
-    const data = await r.json();
-    all = all.concat(data.results || []);
-    cursor = data.has_more ? data.next_cursor : undefined;
-  } while (cursor && all.length < 500); // разумный предел на всякий случай
-  return all;
-}
-
-// ─── ПОИСК ПО ПОСЛЕДНИМ 4 ЦИФРАМ (сразу по обеим базам) ──
-
-app.get('/api/staff/search-last4', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  const digits = (req.query.digits || '').replace(/\D/g, '');
-  if (digits.length !== 4) return res.status(400).json({ error: 'нужно ровно 4 цифры' });
-
-  try {
-    const [cardGuests, generalGuests] = await Promise.all([
-      fetchAllWithPhone(NOTION_GUESTS_DB_ID),
-      fetchAllWithPhone(NOTION_GENERAL_GUESTS_DB_ID)
-    ]);
-
-    const matches = [];
-
-    for (const g of cardGuests) {
-      const phone = g.properties['Телефон']?.phone_number || '';
-      if (phone.replace(/\D/g, '').endsWith(digits)) {
-        matches.push({
-          source: 'card',
-          id: g.id,
-          name: g.properties['Имя Гостя']?.title?.[0]?.plain_text || '',
-          phone
-        });
-      }
-    }
-
-    for (const g of generalGuests) {
-      const phone = g.properties['Телефон']?.phone_number || '';
-      if (phone.replace(/\D/g, '').endsWith(digits)) {
-        // Не дублируем если уже есть карточка с таким же номером
-        const alreadyInCard = matches.some(m => m.source === 'card' && m.phone.replace(/\D/g, '') === phone.replace(/\D/g, ''));
-        if (!alreadyInCard) {
-          matches.push({
-            source: 'general',
-            name: g.properties['Имя']?.title?.[0]?.plain_text || '',
-            phone,
-            bookingsCount: g.properties['Количество броней']?.number || 0
-          });
-        }
-      }
-    }
-
-    res.json(matches);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Search failed' });
-  }
-});
-
-// ─── КАРТОЧКА ГОСТЯ + ВИЗИТЫ ───────────────────────
-
-app.get('/api/staff/guest/:id', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  try {
-    const guestRes = await fetch(`https://api.notion.com/v1/pages/${req.params.id}`, { headers: NOTION_HEADERS });
-    const guest = await guestRes.json();
-    const props = guest.properties;
-
-    const phone = props['Телефон']?.phone_number || '';
-    const status = props['Частота визитов']?.select?.name || '';
-
-    // Расширенный запрос визитов (до 50) — нужен и для списка "последние визиты",
-    // и для расчёта риска оттока, и для подсчёта частоты кальянов (любимая позиция)
-    const visitsRes = await fetch(`https://api.notion.com/v1/databases/${NOTION_VISITS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({
-        filter: { property: 'Гость', relation: { contains: req.params.id } },
-        sorts: [{ property: 'Дата', direction: 'descending' }],
-        page_size: 50
-      })
-    });
-    const visitsData = await visitsRes.json();
-    const allVisits = (visitsData.results || []).map(v => {
-      const vp = v.properties;
-      return {
-        date: vp['Дата']?.date?.start || '',
-        hookah: vp['Кальян']?.rich_text?.[0]?.plain_text || '',
-        notes: vp['Заметки']?.rich_text?.[0]?.plain_text || ''
-      };
-    });
-    const visits = allVisits.slice(0, 5);
-
-    // ── Автотег «Риск оттока» — та же формула, что в /api/admin/guests-table ──
-    const lastVisitDate = allVisits[0]?.date || null;
-    const daysSince = lastVisitDate
-      ? Math.floor((new Date() - new Date(lastVisitDate)) / (1000 * 60 * 60 * 24))
-      : null;
-    const atRisk = (status === 'VIP' || status === 'Постоянный') && (daysSince === null || daysSince >= 30);
-
-    // ── Автотег «Негативный отзыв» — связи Отзывы→Гость нет, ищем по телефону ──
-    let negativeReview = null;
-    if (phone) {
-      try {
-        const revRes = await fetch(`https://api.notion.com/v1/databases/${NOTION_REVIEWS_DB_ID}/query`, {
-          method: 'POST',
-          headers: NOTION_HEADERS,
-          body: JSON.stringify({
-            filter: { property: 'Телефон', phone_number: { equals: phone } },
-            sorts: [{ property: 'Дата', direction: 'descending' }],
-            page_size: 10
-          })
-        });
-        const revData = await revRes.json();
-        const cats = ['Вечер', 'Кальян', 'Напитки', 'Еда', 'Команда'];
-        for (const r of (revData.results || [])) {
-          const rp = r.properties;
-          let worst = null, worstCat = null;
-          for (const c of cats) {
-            const v = rp[c]?.number;
-            if (typeof v === 'number' && v <= 3 && (worst === null || v < worst)) { worst = v; worstCat = c; }
-          }
-          if (worst !== null) {
-            negativeReview = { date: rp['Дата']?.date?.start || '', category: worstCat, score: worst };
-            break; // самый свежий негативный отзыв — этого достаточно для пометки
-          }
-        }
-      } catch (e) { console.error('Negative review check failed:', e); }
-    }
-
-    // ── Любимая позиция — самый частый вкус кальяна среди всех визитов ──
-    const hookahCounts = {};
-    let visitsWithHookah = 0;
-    for (const v of allVisits) {
-      const flavor = (v.hookah || '').trim();
-      if (!flavor) continue;
-      visitsWithHookah++;
-      const key = flavor.toLowerCase();
-      if (!hookahCounts[key]) hookahCounts[key] = { name: flavor, count: 0 };
-      hookahCounts[key].count++;
-    }
-    const topHookah = Object.values(hookahCounts).sort((a, b) => b.count - a.count)[0] || null;
-
-    res.json({
-      id: guest.id,
-      name: props['Имя Гостя']?.title?.[0]?.plain_text || '',
-      status,
-      birthday: props['Дата рождения']?.date?.start || null,
-      phone,
-      important: props['Что важно для гостя']?.rich_text?.[0]?.plain_text || '',
-      tagsSpecial: (props['Теги (особые)']?.multi_select || []).map(o => o.name),
-      tagsAllergy: (props['Теги (аллергии)']?.multi_select || []).map(o => o.name),
-      autoTags: { atRisk, daysSince, negativeReview },
-      favorites: { hookah: topHookah, visitsWithHookah, totalVisits: allVisits.length },
-      visits
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to fetch guest' });
-  }
-});
-
-// ─── ФОТО ГОСТЯ ИЗ TELEGRAM ─────────────────────────
-// В "Карточке Гостя" (CRM) Telegram ID не хранится — его пишет гостевой мини-апп
-// в "Общую базу гостей" при бронировании/заполнении профиля. Поэтому сначала находим
-// гостя там же по телефону, а дальше — обычный Bot API: getUserProfilePhotos → getFile.
-// Ссылка от Telegram живёт около часа, поэтому недолго кэшируем её в памяти,
-// чтобы не дёргать Bot API на каждое открытие одной и той же карточки подряд.
-
-const guestPhotoCache = new Map(); // telegramId -> { url, expiresAt }
-const GUEST_PHOTO_FOUND_TTL = 5 * 60 * 1000;  // 5 минут — чтобы смена аватарки в Telegram быстро подхватывалась
-const GUEST_PHOTO_EMPTY_TTL = 30 * 60 * 1000; // 30 минут — если фото нет вообще, не дёргаем Bot API так часто
-
-async function fetchTelegramPhotoUrl(telegramId, force) {
-  if (!telegramId || !TELEGRAM_BOT_TOKEN) return null;
-
-  const cached = guestPhotoCache.get(telegramId);
-  if (!force && cached && cached.expiresAt > Date.now()) return cached.url;
-
-  const photos = await tgApi('getUserProfilePhotos', { user_id: telegramId, limit: 1 });
-  const firstSet = photos?.result?.photos?.[0];
-  if (!firstSet || !firstSet.length) {
-    guestPhotoCache.set(telegramId, { url: null, expiresAt: Date.now() + GUEST_PHOTO_EMPTY_TTL });
-    return null;
-  }
-
-  const fileId = firstSet[firstSet.length - 1].file_id; // последний элемент — самый крупный размер
-  const fileInfo = await tgApi('getFile', { file_id: fileId });
-  const filePath = fileInfo?.result?.file_path;
-  if (!filePath) return null;
-
-  const url = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${filePath}`;
-  guestPhotoCache.set(telegramId, { url, expiresAt: Date.now() + GUEST_PHOTO_FOUND_TTL });
-  return url;
-}
-
-app.get('/api/staff/guest/:id/photo', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  try {
-    const guestRes = await fetch(`https://api.notion.com/v1/pages/${req.params.id}`, { headers: NOTION_HEADERS });
-    const guest = await guestRes.json();
-    const phone = guest.properties?.['Телефон']?.phone_number || '';
-    if (!phone) return res.json({ photoUrl: null });
-
-    const genRes = await fetch(`https://api.notion.com/v1/databases/${NOTION_GENERAL_GUESTS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ filter: { property: 'Телефон', phone_number: { equals: normalizePhone(phone) } } })
-    });
-    const genData = await genRes.json();
-    const telegramId = genData.results?.[0]?.properties?.['Telegram ID']?.rich_text?.[0]?.plain_text || null;
-    if (!telegramId) return res.json({ photoUrl: null });
-
-    const photoUrl = await fetchTelegramPhotoUrl(telegramId, req.query.force === '1');
-    res.json({ photoUrl });
-  } catch (error) {
-    console.error('Guest photo fetch failed:', error);
-    res.json({ photoUrl: null }); // не критично — карточка просто останется с инициалами
-  }
-});
-
-// ─── РЕДАКТИРОВАНИЕ КАРТОЧКИ ───────────────────────
-
-app.patch('/api/staff/guest/:id', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  const { field, value } = req.body;
-
-  const properties = {};
-  if (field === 'status') properties['Частота визитов'] = { select: { name: value } };
-  else if (field === 'birthday') properties['Дата рождения'] = { date: { start: value } };
-  else if (field === 'phone') properties['Телефон'] = { phone_number: value };
-  else if (field === 'important') properties['Что важно для гостя'] = { rich_text: [{ text: { content: value } }] };
-  else return res.status(400).json({ error: 'unknown field' });
-
-  try {
-    await fetch(`https://api.notion.com/v1/pages/${req.params.id}`, {
-      method: 'PATCH',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ properties })
-    });
-    res.json({ ok: true });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Update failed' });
-  }
-});
-
-// ─── РУЧНЫЕ ТЕГИ (Особые / Аллергии) — добавление и удаление по одному ──
-
-const TAG_GROUP_PROPERTY = {
-  special: 'Теги (особые)',
-  allergy: 'Теги (аллергии)'
-};
-
-app.post('/api/staff/guest/:id/tag', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  const { group, tag, action } = req.body;
-  const propName = TAG_GROUP_PROPERTY[group];
-  const tagName = (tag || '').trim();
-
-  if (!propName || !tagName || !['add', 'remove'].includes(action)) {
-    return res.status(400).json({ error: 'bad request' });
-  }
-
-  try {
-    const pageRes = await fetch(`https://api.notion.com/v1/pages/${req.params.id}`, { headers: NOTION_HEADERS });
-    if (!pageRes.ok) return res.status(502).json({ error: 'Failed to read guest' });
-    const page = await pageRes.json();
-    const current = (page.properties[propName]?.multi_select || []).map(o => o.name);
-
-    const next = action === 'add'
-      ? (current.includes(tagName) ? current : [...current, tagName])
-      : current.filter(t => t !== tagName);
-
-    const upRes = await fetch(`https://api.notion.com/v1/pages/${req.params.id}`, {
-      method: 'PATCH',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ properties: { [propName]: { multi_select: next.map(name => ({ name })) } } })
-    });
-    if (!upRes.ok) {
-      console.error('Tag update failed:', await upRes.text());
-      return res.status(502).json({ error: 'Notion update failed' });
-    }
-
-    res.json({ ok: true, tags: next });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to update tag' });
-  }
-});
-
-// ─── НОВЫЙ ГОСТЬ ────────────────────────────────────
-
-app.post('/api/staff/guest', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  const { name, status, birthday, phone, important } = req.body;
-  if (!name || !status) return res.status(400).json({ error: 'name and status required' });
-
-  const properties = {
-    'Имя Гостя': { title: [{ text: { content: name } }] },
-    'Частота визитов': { select: { name: status } },
-    'Что важно для гостя': { rich_text: [{ text: { content: important || '' } }] }
-  };
-  if (birthday) properties['Дата рождения'] = { date: { start: birthday } };
-  if (phone) properties['Телефон'] = { phone_number: phone };
-
-  try {
-    const r = await fetch('https://api.notion.com/v1/pages', {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ parent: { database_id: NOTION_GUESTS_DB_ID }, properties })
-    });
-    const created = await r.json();
-
-    // Дублируем контакт в общую базу гостей — чтобы она была полным списком, а не только "кто бронировал через эп"
-    if (phone) {
-      const normPhone = normalizePhone(phone);
-      try {
-        const checkRes = await fetch(`https://api.notion.com/v1/databases/${NOTION_GENERAL_GUESTS_DB_ID}/query`, {
-          method: 'POST',
-          headers: NOTION_HEADERS,
-          body: JSON.stringify({ filter: { property: 'Телефон', phone_number: { equals: normPhone } } })
-        });
-        const checkData = await checkRes.json();
-
-        if (!checkData.results?.length) {
-          const genProps = {
-            'Имя': { title: [{ text: { content: name } }] },
-            'Телефон': { phone_number: normPhone },
-            'Источник': { select: { name: 'Персонал' } },
-            'Дата первого контакта': { date: { start: venueDateStr() } },
-            'Количество броней': { number: 0 },
-            'Перенесён в Карточку Гостя': { checkbox: true }
-          };
-          if (birthday) genProps['Дата рождения'] = { date: { start: birthday } };
-
-          await fetch('https://api.notion.com/v1/pages', {
-            method: 'POST',
-            headers: NOTION_HEADERS,
-            body: JSON.stringify({ parent: { database_id: NOTION_GENERAL_GUESTS_DB_ID }, properties: genProps })
-          });
-        } else {
-          // Уже был в общей базе (например бронировал раньше) — просто отмечаем что теперь у него есть карточка
-          await fetch(`https://api.notion.com/v1/pages/${checkData.results[0].id}`, {
-            method: 'PATCH',
-            headers: NOTION_HEADERS,
-            body: JSON.stringify({ properties: { 'Перенесён в Карточку Гостя': { checkbox: true } } })
-          });
-        }
-      } catch (syncError) {
-        console.error('Sync to general DB failed (non-fatal):', syncError);
-      }
-    }
-
-    res.json({ ok: true, id: created.id });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to create guest' });
-  }
-});
-
-// ─── ДОБАВИТЬ / ДОПОЛНИТЬ ВИЗИТ ─────────────────────
-
-async function cleanupOldVisits(guestId, keep = 5) {
-  const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_VISITS_DB_ID}/query`, {
-    method: 'POST',
-    headers: NOTION_HEADERS,
-    body: JSON.stringify({
-      filter: { property: 'Гость', relation: { contains: guestId } },
-      sorts: [{ property: 'Дата', direction: 'descending' }],
-      page_size: 100
-    })
-  });
-  const data = await r.json();
-  const visits = data.results || [];
-  if (visits.length > keep) {
-    for (const old of visits.slice(keep)) {
-      await fetch(`https://api.notion.com/v1/pages/${old.id}`, {
-        method: 'PATCH',
-        headers: NOTION_HEADERS,
-        body: JSON.stringify({ archived: true })
-      });
-    }
-  }
-}
-
-app.post('/api/staff/visit', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  const { guestId, guestName, hookah, notes } = req.body;
-  if (!guestId || !hookah) return res.status(400).json({ error: 'guestId and hookah required' });
-
-  const today = venueDateStr();
-
-  try {
-    const existingRes = await fetch(`https://api.notion.com/v1/databases/${NOTION_VISITS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({
-        filter: {
-          and: [
-            { property: 'Гость', relation: { contains: guestId } },
-            { property: 'Дата', date: { equals: today } }
-          ]
-        }
-      })
-    });
-    const existingData = await existingRes.json();
-    const existing = existingData.results?.[0];
-
-    if (existing) {
-      const existingNotes = existing.properties['Заметки']?.rich_text?.[0]?.plain_text || '';
-      const combinedNotes = notes ? (existingNotes ? `${existingNotes} / ${notes}` : notes) : existingNotes;
-      await fetch(`https://api.notion.com/v1/pages/${existing.id}`, {
-        method: 'PATCH',
-        headers: NOTION_HEADERS,
-        body: JSON.stringify({
-          properties: {
-            'Кальян': { rich_text: [{ text: { content: hookah } }] },
-            'Заметки': { rich_text: [{ text: { content: combinedNotes } }] }
-          }
-        })
-      });
-    } else {
-      await fetch('https://api.notion.com/v1/pages', {
-        method: 'POST',
-        headers: NOTION_HEADERS,
-        body: JSON.stringify({
-          parent: { database_id: NOTION_VISITS_DB_ID },
-          properties: {
-            'Визит': { title: [{ text: { content: `${guestName || 'Гость'} — ${today}` } }] },
-            'Гость': { relation: [{ id: guestId }] },
-            'Дата': { date: { start: today } },
-            'Кальян': { rich_text: [{ text: { content: hookah } }] },
-            'Заметки': { rich_text: [{ text: { content: notes || '' } }] }
-          }
-        })
-      });
-      await cleanupOldVisits(guestId, 5);
-    }
-
-    res.json({ ok: true });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to save visit' });
-  }
-});
-
-// ─── TELEGRAM WEBHOOK (бот для сотрудников) ────────
-
-const WELCOME_TEXT =
-  'Карточки гостей и визиты На Крыше.\n' +
-  'Нажимай кнопку «Открыть», чтобы найти гостя, посмотреть карточку или добавить визит.';
-
-const ENPS_WELCOME_TEXT =
-  'Оцени нас — анонимно, займёт минуту.\n' +
-  'Нажимай кнопку «Открыть», чтобы пройти опрос.';
-
-app.post('/telegram-webhook', async (req, res) => {
-  const update = req.body;
-  try {
-    if (update.message) {
-      const chatId = update.message.chat.id;
-      const text = update.message.text || '';
-
-      // QR-код на служебном помещении ведёт на t.me/<bot>?start=enps — Telegram
-      // присылает это как "/start enps". Открываем мини-апп сразу на опросе,
-      // внутри Telegram (без видимого URL в браузере), а не как обычную ссылку.
-      const isEnpsStart = /^\/start\s+enps\b/.test(text);
-
-      await tgApi('sendMessage', {
-        chat_id: chatId,
-        text: isEnpsStart ? ENPS_WELCOME_TEXT : WELCOME_TEXT,
-        reply_markup: {
-          inline_keyboard: [[
-            { text: 'Открыть', web_app: { url: isEnpsStart ? `${WEBAPP_URL}?enps=1` : WEBAPP_URL } }
-          ]]
-        }
-      });
-    }
-  } catch (error) {
-    console.error('Webhook error:', error);
-  }
-  res.sendStatus(200);
-});
-
-// ─── АДМИН: ОТКРЫТЫЕ ПРОБЛЕМЫ ───────────────────────
-
-// Кто по умолчанию отвечает за проблему по категории
-// Всё по умолчанию падает на администратора — он сам направляет конкретному
-// ответственному через кнопку "Назначить" в приложении (endpoint /reassign ниже)
-const CATEGORY_ROLE_MAP = {
-  'Кальян': 'Администратор',
-  'Напитки': 'Администратор',
-  'Еда': 'Администратор',
-  'Команда': 'Администратор',
-  'Общее': 'Администратор'
-};
-const ASSIGNABLE_ROLES = ['КМ', 'Бармен', 'Повар', 'Официант', 'Администратор'];
-
-function defaultDeadline(severity) {
-  const days = severity === 'Высокая' ? 3 : 7;
-  const d = new Date();
-  d.setDate(d.getDate() + days);
-  return venueDateStr(d);
-}
-
-// Список проблем — теперь доступен всем сотрудникам (не только админу), чтобы
-// ответственный по категории тоже видел и мог взять в работу свою проблему
-app.get('/api/staff/problems', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  try {
-    const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_PROBLEMS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({
-        filter: { or: [
-          { property: 'Статус', select: { equals: 'Задачи' } },
-          { property: 'Статус', select: { equals: 'В работе' } }
-        ]},
-        sorts: [{ property: 'Дата отзыва', direction: 'descending' }]
-      })
-    });
-    const data = await r.json();
-    const problems = (data.results || []).map(p => {
-      const props = p.properties;
-      return {
-        id: p.id,
-        category: props['Категория']?.select?.name || '',
-        score: props['Оценка гостя']?.number ?? null,
-        comment: props['Комментарий гостя']?.rich_text?.[0]?.plain_text || '',
-        responsible: props['Ответственный']?.rich_text?.[0]?.plain_text || '',
-        deadline: props['Срок исполнения']?.date?.start || '',
-        status: props['Статус']?.select?.name || '',
-        severity: props['Критичность']?.select?.name || '',
-        rootCause: props['Корневая причина']?.rich_text?.[0]?.plain_text || ''
-      };
-    });
-    res.json(problems);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to fetch problems' });
-  }
-});
-
-// Перевод "Задачи" → "В работе" — обязательно с коренной причиной.
-// Разрешено только ответственному по категории (по его роли) или администратору.
-app.post('/api/staff/problem/:id/take', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  const rootCause = (req.body?.rootCause || '').trim();
-  const deadline = (req.body?.deadline || '').trim();
-  if (!rootCause) return res.status(400).json({ error: 'Нужно указать коренную причину, прежде чем взять в работу' });
-  if (!deadline) return res.status(400).json({ error: 'Нужно указать срок исполнения, прежде чем взять в работу' });
-
-  try {
-    const pageRes = await fetch(`https://api.notion.com/v1/pages/${req.params.id}`, { headers: NOTION_HEADERS });
-    const page = await pageRes.json();
-    const responsible = page.properties['Ответственный']?.rich_text?.[0]?.plain_text || '';
-    const employee = req.employee;
-
-    if (employee.role !== 'Администратор' && employee.role !== responsible) {
-      return res.status(403).json({ error: `Взять в работу может только «${responsible}» или администратор` });
-    }
-
-    await fetch(`https://api.notion.com/v1/pages/${req.params.id}`, {
-      method: 'PATCH',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({
-        properties: {
-          'Статус': { select: { name: 'В работе' } },
-          'Корневая причина': { rich_text: [{ text: { content: rootCause } }] },
-          'Срок исполнения': { date: { start: deadline } }
-        }
-      })
-    });
-    res.json({ ok: true });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to update problem' });
-  }
-});
-
-// Перевод "В работе" → "Решена" — та же проверка прав
-app.post('/api/staff/problem/:id/resolve', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-
-  try {
-    const pageRes = await fetch(`https://api.notion.com/v1/pages/${req.params.id}`, { headers: NOTION_HEADERS });
-    const page = await pageRes.json();
-    const responsible = page.properties['Ответственный']?.rich_text?.[0]?.plain_text || '';
-    const employee = req.employee;
-
-    if (employee.role !== 'Администратор' && employee.role !== responsible) {
-      return res.status(403).json({ error: `Закрыть может только «${responsible}» или администратор` });
-    }
-
-    await fetch(`https://api.notion.com/v1/pages/${req.params.id}`, {
-      method: 'PATCH',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ properties: { 'Статус': { select: { name: 'Решена' } } } })
-    });
-    res.json({ ok: true });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to resolve problem' });
-  }
-});
-
-// Назначить конкретного ответственного по роли — только администратор
-app.post('/api/staff/problem/:id/reassign', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
-  const role = (req.body?.role || '').trim();
-  const deadline = (req.body?.deadline || '').trim();
-  if (!ASSIGNABLE_ROLES.includes(role)) {
-    return res.status(400).json({ error: 'Неизвестная роль' });
-  }
-
-  const properties = { 'Ответственный': { rich_text: [{ text: { content: role } }] } };
-  if (deadline) properties['Срок исполнения'] = { date: { start: deadline } };
-
-  try {
-    await fetch(`https://api.notion.com/v1/pages/${req.params.id}`, {
-      method: 'PATCH',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ properties })
-    });
-    res.json({ ok: true });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to reassign problem' });
-  }
-});
-
-// Отдаём список ролей клиенту, чтобы не дублировать его в двух местах
-app.get('/api/staff/assignable-roles', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  res.json(ASSIGNABLE_ROLES);
-});
-
-// ─── eNPS ОТ СОТРУДНИКОВ — АНОНИМНО ─────────────────
-// PIN проверяется только чтобы подтвердить что это реальный сотрудник —
-// само имя/PIN/роль нигде не сохраняется вместе с ответом, только оценка и текст.
-
-app.post('/api/staff/enps-review', async (req, res) => {
-  if (!(await checkPin(req, res))) return; // подтверждаем сотрудника, но req.employee дальше не используем
-
-  const score = Number(req.body?.score);
-  const liked = (req.body?.liked || '').trim();
-  const improve = (req.body?.improve || '').trim();
-
-  if (!Number.isFinite(score) || score < 0 || score > 10) {
-    return res.status(400).json({ error: 'Некорректная оценка' });
-  }
-  if (!liked) {
-    return res.status(400).json({ error: 'Напиши что тебе нравится в работе здесь' });
-  }
-  if (!improve) {
-    return res.status(400).json({ error: 'Напиши что можно улучшить' });
-  }
-
-  try {
-    const today = venueDateStr();
-    await fetch('https://api.notion.com/v1/pages', {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({
-        parent: { database_id: NOTION_ENPS_DB_ID },
-        properties: {
-          'Запись': { title: [{ text: { content: `eNPS — ${today}` } }] },
-          'Дата': { date: { start: today } },
-          'Оценка': { number: score },
-          'Что нравится': { rich_text: [{ text: { content: liked } }] },
-          'Что улучшить': { rich_text: [{ text: { content: improve } }] }
-        }
-      })
-    });
-    res.json({ ok: true });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to save eNPS review' });
-  }
-});
-
-
-app.get('/api/admin/problems', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
-  try {
-    const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_PROBLEMS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({
-        filter: { or: [
-          { property: 'Статус', select: { equals: 'Задачи' } },
-          { property: 'Статус', select: { equals: 'В работе' } }
-        ]},
-        sorts: [{ property: 'Дата отзыва', direction: 'descending' }]
-      })
-    });
-    const data = await r.json();
-    const problems = (data.results || []).map(p => {
-      const props = p.properties;
-      return {
-        id: p.id,
-        category: props['Категория']?.select?.name || '',
-        score: props['Оценка гостя']?.number ?? null,
-        comment: props['Комментарий гостя']?.rich_text?.[0]?.plain_text || '',
-        responsible: props['Ответственный']?.rich_text?.[0]?.plain_text || '',
-        deadline: props['Срок исполнения']?.date?.start || '',
-        status: props['Статус']?.select?.name || ''
-      };
-    });
-    res.json(problems);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to fetch problems' });
-  }
-});
-
-// ─── АДМИН: МЕРОПРИЯТИЯ (просмотр + добавление) ────
-
-app.get('/api/admin/events', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
-  try {
-    const today = venueDateStr();
-    const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_EVENTS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({
-        filter: { property: 'Дата', date: { on_or_after: today } },
-        sorts: [{ property: 'Дата', direction: 'ascending' }]
-      })
-    });
-    const data = await r.json();
-    const events = (data.results || []).map(e => ({
-      id: e.id,
-      name: e.properties['Название']?.title?.[0]?.plain_text || '',
-      format: e.properties['Формат']?.select?.name || '',
-      date: e.properties['Дата']?.date?.start || '',
-      description: e.properties['Описание']?.rich_text?.[0]?.plain_text || ''
-    }));
-    res.json(events);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to fetch events' });
-  }
-});
-
-app.post('/api/admin/events', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
-  const { name, format, date, description } = req.body;
-  if (!name || !format || !date) return res.status(400).json({ error: 'name, format and date required' });
-
-  try {
-    const properties = {
-      'Название': { title: [{ text: { content: name } }] },
-      'Формат': { select: { name: format } },
-      'Дата': { date: { start: date } }
-    };
-    if (description) properties['Описание'] = { rich_text: [{ text: { content: description } }] };
-
-    await fetch('https://api.notion.com/v1/pages', {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ parent: { database_id: NOTION_EVENTS_DB_ID }, properties })
-    });
-    res.json({ ok: true });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to create event' });
-  }
-});
-
-// Редактировать мероприятие — чтобы никто не заходил в Notion, всё через приложение
-app.patch('/api/admin/events/:id', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
-  const { name, format, date, description } = req.body;
-
-  const properties = {};
-  if (name !== undefined) properties['Название'] = { title: [{ text: { content: name } }] };
-  if (format !== undefined) properties['Формат'] = { select: { name: format } };
-  if (date !== undefined) properties['Дата'] = { date: { start: date } };
-  if (description !== undefined) properties['Описание'] = { rich_text: [{ text: { content: description } }] };
-
-  if (!Object.keys(properties).length) return res.status(400).json({ error: 'Нечего обновлять' });
-
-  try {
-    await fetch(`https://api.notion.com/v1/pages/${req.params.id}`, {
-      method: 'PATCH',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ properties })
-    });
-    res.json({ ok: true });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to update event' });
-  }
-});
-
-// Удалить мероприятие (архивируем в Notion — это их аналог удаления)
-app.delete('/api/admin/events/:id', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
-  try {
-    await fetch(`https://api.notion.com/v1/pages/${req.params.id}`, {
-      method: 'PATCH',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ archived: true })
-    });
-    res.json({ ok: true });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to delete event' });
-  }
-});
-
-// ─── БРОНИ (единый список — из бота и с сайта) ──────
-// Отдельной базы броней нет: каждая бронь — запись в текстовом поле
-// «История броней» гостя в общей базе контактов (та же, что использует бот
-// бронирования и сайт). Формат записи:
-// "ISO-дата|текст|тип|uid|гостей|комментарий" + суффикс " (подтверждено)" / " (отменено)".
-//
-// Подтверждение/отмена/перенос сами по себе пишутся не здесь, а в
-// notion-proxy-na-kryishe (у него бот, которым можно написать гостю) — этот
-// файл только читает общий источник и, когда админ жмёт кнопку в панели,
-// просит notion-proxy выполнить действие через внутренний эндпоинт
-// (см. callGuestProxy ниже). Так гость получает то же автосообщение,
-// что и при подтверждении через кнопку в Telegram, откуда бы админ ни нажал.
-
-function stripBookingSuffix(raw) {
+// Каждая запись в "Истории броней" хранится как:
+// "ISO-дата|текст|тип|uid|гостей|комментарий" (плюс статус-суффикс в конце).
+// Тип нужен чтобы разные виды броней (стол/VIP/мероприятие) не мешали друг другу.
+// Гостей/комментарий — новые поля (раньше эти данные летели только в Telegram
+// и терялись после того как сообщение уходило из виду). Старые записи без этих
+// полей парсятся так же нормально — просто guests/comment будут пустыми.
+function stripSuffix(raw) {
   return raw.replace(' (подтверждено)', '').replace(' (отменено)', '');
 }
-function parseBookingEntry(raw) {
-  const clean = stripBookingSuffix(raw);
+// В комментарии гостя вырезаем "|" и "," — это служебные разделители формата,
+// иначе комментарий может случайно разорвать запись или всю историю.
+function sanitizeBookingComment(s) {
+  return String(s || '').replace(/[|,]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+}
+// То же самое, но короче — для названия стола ("Терраса 3" и т.п.).
+function sanitizeTableLabel(s) {
+  return String(s || '').replace(/[|,]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+}
+function parseEntry(raw) {
+  const clean = stripSuffix(raw);
   const parts = clean.split('|');
   if (parts.length === 1) {
     return { iso: null, display: parts[0], kind: 'table', uid: null, guests: null, comment: '', table: '' };
@@ -1361,339 +88,115 @@ function parseBookingEntry(raw) {
     uid: parts[3] || null,
     guests: parts[4] ? (Number(parts[4]) || null) : null,
     comment: parts[5] || '',
-    // Физический стол, назначенный брони персоналом — 7-е поле; у записей без
-    // назначенного стола (или у старых, ещё до этой возможности) — просто ''.
+    // Номер/название физического стола, который персонал назначил брони —
+    // 7-е поле, добавленное позже; у старых записей его нет, тогда просто ''.
     table: parts[6] || ''
   };
 }
-function isBookingExpired(iso) {
-  if (!iso) return true; // старые записи без даты считаем прошедшими
-  return iso.slice(0, 10) < venueDateStr();
+function displayEntry(raw) {
+  return parseEntry(raw).display;
+}
+function baseEntry(raw) {
+  return stripSuffix(raw);
+}
+function isEntryExpired(iso) {
+  if (!iso) return true; // старые записи без даты — считаем что бронь уже прошла
+  const entryDate = iso.slice(0, 10);
+  const todayDate = new Date().toISOString().slice(0, 10);
+  return entryDate < todayDate;
 }
 
-// Видит только администратор.
-app.get('/api/staff/bookings', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
+async function tgApi(method, payload) {
+  if (!TELEGRAM_BOT_TOKEN) return null;
   try {
-    let allResults = [];
-    let cursor;
-    do {
-      const body = { page_size: 100 };
-      if (cursor) body.start_cursor = cursor;
-      const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_GENERAL_GUESTS_DB_ID}/query`, {
-        method: 'POST',
-        headers: NOTION_HEADERS,
-        body: JSON.stringify(body)
-      });
-      if (!r.ok) return res.status(502).json({ error: 'Notion query failed' });
-      const data = await r.json();
-      allResults = allResults.concat(data.results || []);
-      cursor = data.has_more ? data.next_cursor : undefined;
-    } while (cursor);
-
-    const bookings = [];
-    for (const page of allResults) {
-      const props = page.properties;
-      const name = props['Имя']?.title?.[0]?.plain_text || 'Гость';
-      const phone = props['Телефон']?.phone_number || '';
-      const history = props['История броней']?.rich_text?.[0]?.plain_text || '';
-      if (!history) continue;
-
-      const entries = history.split(',').map(s => s.trim()).filter(Boolean);
-      for (const raw of entries) {
-        if (raw.includes('(отменено)')) continue;
-        const confirmed = raw.includes('(подтверждено)');
-        const { iso, display, kind, guests, comment, table } = parseBookingEntry(raw);
-        if (isBookingExpired(iso)) continue;
-
-        let kindLabel = 'Стол';
-        let eventName = null;
-        if (kind === 'vip') kindLabel = 'VIP-комната';
-        else if (kind && kind.startsWith('event:')) { kindLabel = 'Мероприятие'; eventName = kind.slice(6); }
-
-        // entry — стрипнутая (без суффикса) исходная запись, ей же панель ссылается
-        // на конкретную бронь при подтверждении/отмене/переносе — как опаковый токен.
-        bookings.push({
-          name, phone, iso, display, guests, comment, table,
-          status: confirmed ? 'confirmed' : 'pending',
-          kind: kindLabel, eventName,
-          entry: stripBookingSuffix(raw)
-        });
-      }
-    }
-
-    bookings.sort((a, b) => (a.iso || '').localeCompare(b.iso || ''));
-    res.json(bookings);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to fetch bookings' });
+    const res = await fetchWithTimeout(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    return await res.json();
+  } catch (err) {
+    console.error(`Telegram API ${method} failed:`, err);
+    return null;
   }
-});
-
-// ─── ДЕЙСТВИЯ НАД БРОНЬЮ (подтвердить / отменить / перенести) ──
-// Сам этот сервис в Notion для этих действий не пишет — просит сделать это
-// notion-proxy-na-kryishe через внутренний эндпоинт (у него бот, которым можно
-// написать гостю; у стаф-бота — другого — такой возможности нет).
-// Несколько попыток на случай временной недоступности; если совсем не достучались —
-// честно возвращаем ошибку, а не тихий "успех" без реального результата.
-
-const GUEST_PROXY_BASE = process.env.GUEST_PROXY_BASE || 'https://notion-proxy-na-kryishe-production.up.railway.app';
-const INTERNAL_ADMIN_KEY = process.env.INTERNAL_ADMIN_KEY;
-
-async function callGuestProxy(path, payload) {
-  if (!INTERNAL_ADMIN_KEY) return { reached: false, reason: 'no_key' };
-  const attempts = 3;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      const r = await fetch(`${GUEST_PROXY_BASE}${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-internal-key': INTERNAL_ADMIN_KEY },
-        body: JSON.stringify(payload)
-      });
-      const data = await r.json().catch(() => ({}));
-      if (r.ok) return { reached: true, ...data };
-      if (r.status < 500) return { reached: true, httpError: r.status, ...data }; // не временная ошибка — ретраить бессмысленно
-    } catch (e) {
-      // сетевая проблема — пробуем ещё раз
-    }
-    if (i < attempts - 1) await new Promise(r2 => setTimeout(r2, 400 * (i + 1)));
-  }
-  return { reached: false, reason: 'unreachable' };
 }
 
-// Если entry, с которым панель ушла подтверждать/отменять/редактировать, уже
-// не совпадает с тем, что реально лежит в Notion (например, кто-то параллельно
-// назначил стол этой же брони — теперь это устранено блокировкой на стороне
-// notion-proxy, но сеть есть сеть, и бронь могли успеть поменять между тем как
-// список открыли и тем как нажали кнопку) — говорим об этом прямо, а не молчим
-// "успехом", который на деле ничего не изменил.
-function bookingActionErrorMessage(result) {
-  if (result.error === 'booking not found') {
-    return 'Эта бронь уже изменилась (например, кто-то назначил стол или сохранил другое время) — обновите список броней и попробуйте снова';
-  }
-  return 'Гость не найден';
+async function sendTelegramMessage(chatId, text, replyMarkup) {
+  if (!chatId) return null;
+  const payload = { chat_id: chatId, text };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
+  return tgApi('sendMessage', payload);
 }
 
-app.post('/api/staff/bookings/confirm', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
-  const { phone, entry } = req.body;
-  if (!phone || !entry) return res.status(400).json({ error: 'phone and entry required' });
+function formatBookingDetails({ name, phone, date, time, guests, comment, room, eventName }) {
+  const roomLine = room ? `🔺 ${room}\n` : '';
+  const eventLine = eventName ? `🎉 Мероприятие: ${eventName}\n` : '';
+  return (
+    roomLine +
+    eventLine +
+    `👤 Имя: ${name}\n` +
+    `📱 Телефон: ${phone}\n` +
+    `🗓 Дата: ${date || '—'}\n` +
+    `⏰ Время: ${time || '—'}\n` +
+    `👥 Гостей: ${guests || '—'}` +
+    (comment ? `\n💬 Комментарий: ${comment}` : '')
+  );
+}
 
-  const result = await callGuestProxy('/api/internal/booking/confirm', { phone, entry });
-  if (!result.reached) return res.status(502).json({ error: 'Не удалось выполнить действие, попробуйте ещё раз' });
-  if (result.httpError === 404) return res.status(404).json({ error: bookingActionErrorMessage(result) });
-  res.json({ ok: true, notified: !!result.notified });
-});
+// ─── EVENTS ───────────────────────────────────────
 
-app.post('/api/staff/bookings/cancel', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
-  const { phone, entry, message } = req.body;
-  if (!phone || !entry) return res.status(400).json({ error: 'phone and entry required' });
-
-  const result = await callGuestProxy('/api/internal/booking/cancel', { phone, entry, message });
-  if (!result.reached) return res.status(502).json({ error: 'Не удалось выполнить действие, попробуйте ещё раз' });
-  if (result.httpError === 404) return res.status(404).json({ error: bookingActionErrorMessage(result) });
-  res.json({ ok: true, notified: !!result.notified });
-});
-
-app.post('/api/staff/bookings/edit', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
-  const { phone, entry, dateISO, time, guests, comment } = req.body;
-  if (!phone || !entry || !dateISO || !time) {
-    return res.status(400).json({ error: 'phone, entry, dateISO and time required' });
-  }
-
-  const result = await callGuestProxy('/api/internal/booking/edit', { phone, entry, dateISO, time, guests, comment });
-  if (!result.reached) return res.status(502).json({ error: 'Не удалось выполнить действие, попробуйте ещё раз' });
-  if (result.httpError === 404) return res.status(404).json({ error: bookingActionErrorMessage(result) });
-  res.json({ ok: true, notified: !!result.notified, newEntry: result.newEntry, newDisplayText: result.newDisplayText });
-});
-
-// Внести бронь вручную (гость позвонил) — сразу подтверждённая, без похода
-// гостя через мини-апп/бота. Источник в Notion помечается отдельно ("Телефон"),
-// чтобы потом можно было посчитать долю броней по каналам.
-app.post('/api/staff/bookings/add', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
-  const { name, phone, dateISO, time, guests, comment, table } = req.body;
-  if (!name || !phone || !dateISO || !time) {
-    return res.status(400).json({ error: 'Имя, телефон, дата и время обязательны' });
-  }
-
-  const result = await callGuestProxy('/api/internal/booking/create', { name, phone, dateISO, time, guests, comment, table });
-  if (!result.reached) return res.status(502).json({ error: 'Не удалось выполнить действие, попробуйте ещё раз' });
-  if (result.httpError) return res.status(result.httpError).json({ error: result.error || 'Не удалось создать бронь' });
-  res.json({ ok: true, entry: result.entry, display: result.display });
-});
-
-// Назначить/сменить стол у брони — внутренняя пометка для персонала (не
-// уведомляет гостя и не трогает статус подтверждения).
-app.post('/api/staff/bookings/table', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
-  const { phone, entry, table } = req.body;
-  if (!phone || !entry) return res.status(400).json({ error: 'phone and entry required' });
-
-  const result = await callGuestProxy('/api/internal/booking/table', { phone, entry, table });
-  if (!result.reached) return res.status(502).json({ error: 'Не удалось выполнить действие, попробуйте ещё раз' });
-  if (result.httpError === 404) return res.status(404).json({ error: 'Бронь не найдена' });
-  res.json({ ok: true, newEntry: result.newEntry });
-});
-
-// ─── ГРАФИК СМЕН (замена Supershift) ────────────────
-// Видит весь график вся команда (кто с кем работает), а редактирует —
-// только администратор. Одна запись = один сотрудник на одну дату.
-
-// Список сотрудников — нужен всем, чтобы подписывать чужие смены в календаре,
-// и админу отдельно — для выбора при назначении смены.
-app.get('/api/staff/employees-list', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  await ensureEmployeesFresh();
-  res.json(employeesCache.map(e => ({ id: e.id, name: e.name, role: e.role })));
-});
-
-// Смены за период (месяц для календаря) — вся команда видит всех.
-app.get('/api/staff/schedule', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  const from = req.query.from;
-  const to = req.query.to;
-  if (!from || !to) return res.status(400).json({ error: 'from and to required' });
-
+app.get('/api/events', async (req, res) => {
+  const today = new Date().toISOString().split('T')[0];
   try {
-    const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_SCHEDULE_DB_ID}/query`, {
+    const response = await fetchWithTimeout(`https://api.notion.com/v1/databases/${NOTION_EVENTS_DB_ID}/query`, {
       method: 'POST',
       headers: NOTION_HEADERS,
       body: JSON.stringify({
-        filter: {
-          and: [
-            { property: 'Дата', date: { on_or_after: from } },
-            { property: 'Дата', date: { on_or_before: to } }
-          ]
-        },
+        filter: { property: 'Дата', date: { on_or_after: today } },
         sorts: [{ property: 'Дата', direction: 'ascending' }]
       })
     });
-    const data = await r.json();
-    const shifts = (data.results || []).map(p => {
-      const props = p.properties;
+    const data = await response.json();
+    const events = (data.results || []).map(e => {
+      const props = e.properties;
       return {
-        id: p.id,
-        employeeId: props['Сотрудник']?.relation?.[0]?.id || null,
+        name: props['Название']?.title?.[0]?.plain_text || '—',
+        format: props['Формат']?.select?.name || '',
         date: props['Дата']?.date?.start || '',
-        status: props['Статус']?.select?.name || 'Работает',
-        time: props['Время']?.rich_text?.[0]?.plain_text || '',
-        note: props['Заметка']?.rich_text?.[0]?.plain_text || ''
+        description: props['Описание']?.rich_text?.[0]?.plain_text || ''
       };
     });
-    res.json(shifts);
+    res.json(events);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Failed to fetch schedule' });
+    res.status(500).json({ error: 'Failed to fetch events' });
   }
 });
 
-// Создать/обновить смену — только администратор. Один сотрудник + одна дата = одна
-// запись, при повторном сохранении просто обновляем её, а не плодим дубли.
-app.post('/api/admin/schedule', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
-  const { employeeId, date, status, time, note } = req.body;
-  if (!employeeId || !date) return res.status(400).json({ error: 'employeeId and date required' });
+// ─── ОТЗЫВ CSI/NPS (из скрытого экрана по QR-коду) ─────
 
-  await ensureEmployeesFresh();
-  const employee = employeesCache.find(e => e.id === employeeId);
-  const employeeName = employee?.name || 'Сотрудник';
+// Оценки 1-3 из 10 по любой категории (плюс общее "как вам вечер" и низкий NPS) —
+// считаем критичной проблемой и заводим её автоматически, чтобы админ увидел и
+// разобрался, а не просто цифра утонула в статистике. Заводим только если есть
+// комментарий — голая цифра без объяснения не даёт зацепиться за коренную причину.
+const REVIEW_CATEGORY_MAP = {
+  vecher: 'Общее',
+  kalyan: 'Кальян',
+  napitki: 'Напитки',
+  eda: 'Еда',
+  komanda: 'Команда'
+};
 
-  try {
-    const properties = {
-      'Запись': { title: [{ text: { content: `${employeeName} — ${date}` } }] },
-      'Сотрудник': { relation: [{ id: employeeId }] },
-      'Дата': { date: { start: date } },
-      'Статус': { select: { name: status || 'Работает' } }
-    };
-    if (time !== undefined) properties['Время'] = { rich_text: time ? [{ text: { content: time } }] : [] };
-    if (note !== undefined) properties['Заметка'] = { rich_text: note ? [{ text: { content: note } }] : [] };
-
-    const existingRes = await fetch(`https://api.notion.com/v1/databases/${NOTION_SCHEDULE_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({
-        filter: {
-          and: [
-            { property: 'Дата', date: { equals: date } },
-            { property: 'Сотрудник', relation: { contains: employeeId } }
-          ]
-        }
-      })
-    });
-    const existingData = await existingRes.json();
-    if (!existingRes.ok) {
-      console.error('Notion query failed (schedule):', existingData);
-      return res.status(502).json({ error: existingData?.message || 'Notion отклонил запрос — проверь доступ интеграции к базе "График смен"' });
-    }
-    const existing = existingData.results?.[0];
-
-    if (existing) {
-      const patchRes = await fetch(`https://api.notion.com/v1/pages/${existing.id}`, {
-        method: 'PATCH',
-        headers: NOTION_HEADERS,
-        body: JSON.stringify({ properties })
-      });
-      const patchData = await patchRes.json();
-      if (!patchRes.ok) {
-        console.error('Notion update failed (schedule):', patchData);
-        return res.status(502).json({ error: patchData?.message || 'Notion отклонил обновление смены' });
-      }
-      return res.json({ ok: true, id: existing.id });
-    }
-
-    const createRes = await fetch('https://api.notion.com/v1/pages', {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ parent: { database_id: NOTION_SCHEDULE_DB_ID }, properties })
-    });
-    const createData = await createRes.json();
-    if (!createRes.ok) {
-      console.error('Notion create failed (schedule):', createData);
-      return res.status(502).json({ error: createData?.message || 'Notion отклонил создание смены — проверь доступ интеграции к базе "График смен"' });
-    }
-    res.json({ ok: true, id: createData.id });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to save shift' });
-  }
-});
-
-// Удалить смену (сбросить день сотрудника обратно в пустое состояние) — только администратор
-app.delete('/api/admin/schedule/:id', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
-  try {
-    const patchRes = await fetch(`https://api.notion.com/v1/pages/${req.params.id}`, {
-      method: 'PATCH',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ archived: true })
-    });
-    const patchData = await patchRes.json();
-    if (!patchRes.ok) {
-      console.error('Notion delete failed (schedule):', patchData);
-      return res.status(502).json({ error: patchData?.message || 'Notion отклонил удаление смены' });
-    }
-    res.json({ ok: true });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to delete shift' });
-  }
-});
-
-// ─── СТОП-ЛИСТ (снятие позиций меню "В наличии") ────
-// Один и тот же источник, что у гостя в приложении — снял здесь, гость уже
-// не видит позицию в меню. Смотреть могут все, менять — только тот, чья категория.
-
-// Полный список меню (включая недоступное) — видят все залогиненные сотрудники
-app.get('/api/staff/menu', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
+// ─── МЕНЮ (публично, без PIN) ───────────────────────
+// Показываем только то, что реально есть в наличии — стоп-лист персонала
+// правит ту же базу, так что тут просто фильтр по галочке "В наличии".
+app.get('/api/menu', async (req, res) => {
   try {
     const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_MENU_DB_ID}/query`, {
       method: 'POST',
       headers: NOTION_HEADERS,
       body: JSON.stringify({
+        filter: { property: 'В наличии', checkbox: { equals: true } },
         sorts: [
           { property: 'Категория', direction: 'ascending' },
           { property: 'Подкатегория', direction: 'ascending' },
@@ -1708,13 +211,18 @@ app.get('/api/staff/menu', async (req, res) => {
     }
     const items = (data.results || []).map(p => {
       const props = p.properties;
+      const file = props['Фото']?.files?.[0] || null;
+      // Файл, загруженный прямо в Notion, отдаёт временную ссылку (~1 час) — это ок,
+      // т.к. гость получает её заново при каждом открытии меню. Внешняя ссылка (url) бессрочная.
+      const photoUrl = file ? (file.file?.url || file.external?.url || null) : null;
       return {
         id: p.id,
         name: props['Название']?.title?.[0]?.plain_text || '',
         category: props['Категория']?.select?.name || '',
         subcategory: props['Подкатегория']?.select?.name || '',
         price: props['Цена']?.number ?? null,
-        available: props['В наличии']?.checkbox === true
+        description: props['Описание']?.rich_text?.[0]?.plain_text || '',
+        photoUrl
       };
     });
     res.json(items);
@@ -1724,348 +232,1120 @@ app.get('/api/staff/menu', async (req, res) => {
   }
 });
 
-// Переключить "В наличии" одной позиции — проверяем роль строго по категории
-// ЭТОЙ позиции в Notion (не по тому, что прислал клиент), чтобы права нельзя
-// было обойти подменой запроса.
-app.patch('/api/staff/menu/:id', async (req, res) => {
-  if (!(await checkPin(req, res))) return;
-  const { available } = req.body;
-  if (typeof available !== 'boolean') return res.status(400).json({ error: 'available (boolean) required' });
+// Аватарка гостя в шапке/профиле мини-аппы. Не полагаемся только на initDataUnsafe.user.photo_url —
+// это значение приходит от Telegram-клиента и может подолгу не обновляться после смены фото
+// (тот же эффект кэширования WebView, что и с другими полями initData). Поэтому здесь же
+// дополнительно спрашиваем актуальное фото напрямую у Bot API: getUserProfilePhotos → getFile.
+const guestOwnPhotoCache = new Map(); // telegramId -> { url, expiresAt }
+const GUEST_OWN_PHOTO_FOUND_TTL = 5 * 60 * 1000;  // 5 минут
+const GUEST_OWN_PHOTO_EMPTY_TTL = 30 * 60 * 1000; // 30 минут — если фото нет, не дёргаем API часто
 
+async function fetchGuestOwnPhotoUrl(telegramId) {
+  if (!telegramId || !TELEGRAM_BOT_TOKEN) return null;
+
+  const cached = guestOwnPhotoCache.get(telegramId);
+  if (cached && cached.expiresAt > Date.now()) return cached.url;
+
+  const photos = await tgApi('getUserProfilePhotos', { user_id: telegramId, limit: 1 });
+  const firstSet = photos?.result?.photos?.[0];
+  if (!firstSet || !firstSet.length) {
+    guestOwnPhotoCache.set(telegramId, { url: null, expiresAt: Date.now() + GUEST_OWN_PHOTO_EMPTY_TTL });
+    return null;
+  }
+
+  const fileId = firstSet[firstSet.length - 1].file_id; // последний элемент — самый крупный размер
+  const fileInfo = await tgApi('getFile', { file_id: fileId });
+  const filePath = fileInfo?.result?.file_path;
+  if (!filePath) return null;
+
+  const url = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${filePath}`;
+  guestOwnPhotoCache.set(telegramId, { url, expiresAt: Date.now() + GUEST_OWN_PHOTO_FOUND_TTL });
+  return url;
+}
+
+app.get('/api/guest/photo', async (req, res) => {
+  const telegramId = req.query.telegramId;
+  if (!telegramId) return res.json({ photoUrl: null });
   try {
-    const pageRes = await fetch(`https://api.notion.com/v1/pages/${req.params.id}`, { headers: NOTION_HEADERS });
-    const page = await pageRes.json();
-    if (!pageRes.ok) return res.status(404).json({ error: 'Позиция не найдена' });
-
-    const category = page.properties?.['Категория']?.select?.name || '';
-    if (!canEditMenuCategory(req.employee.role, category)) {
-      return res.status(403).json({ error: `Эту категорию может менять только ${MENU_CATEGORY_EDIT_ROLE[category] || 'администратор'}` });
-    }
-
-    const patchRes = await fetch(`https://api.notion.com/v1/pages/${req.params.id}`, {
-      method: 'PATCH',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ properties: { 'В наличии': { checkbox: available } } })
-    });
-    const patchData = await patchRes.json();
-    if (!patchRes.ok) {
-      console.error('Notion menu toggle failed:', patchData);
-      return res.status(502).json({ error: 'Notion отклонил изменение' });
-    }
-    res.json({ ok: true });
+    const photoUrl = await fetchGuestOwnPhotoUrl(String(telegramId));
+    res.json({ photoUrl });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to update menu item' });
+    console.error('Guest own photo fetch failed:', error);
+    res.json({ photoUrl: null }); // не критично — останется аватар из initData или инициал
   }
 });
 
-// ─── АДМИН: СТАТИСТИКА (CSI/NPS, eNPS, визиты) ─────
-// CSI/NPS теперь читаются из Notion "Отзывы CSI" (см. NOTION_REVIEWS_DB_ID выше).
-// eNPS пока остаётся в Google-таблице — её мы не трогали.
+function reviewDeadline(days) {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return d.toISOString().split('T')[0];
+}
 
-const ENPS_SHEETS_ID = '1nKMCWGXsdQ-3KgMeFtPkIlmKlim4Ae6YFT-jEnZnLwY';
+app.post('/api/review', async (req, res) => {
+  const { vecher, kalyan, napitki, eda, komanda, nps, comment, phone: rawPhone, telegramId, telegramUsername } = req.body;
 
-function parseCsv(text) {
-  return text.trim().split('\n').map(line => {
-    // простой CSV-парсер с поддержкой кавычек
-    const cells = [];
-    let cur = '', inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (ch === '"') inQuotes = !inQuotes;
-      else if (ch === ',' && !inQuotes) { cells.push(cur); cur = ''; }
-      else cur += ch;
+  const scores = { vecher, kalyan, napitki, eda, komanda, nps };
+  for (const key of Object.keys(scores)) {
+    const n = Number(scores[key]);
+    if (!Number.isFinite(n) || n < 1 || n > 10) {
+      return res.status(400).json({ error: `Некорректная оценка: ${key}` });
     }
-    cells.push(cur);
-    return cells.map(c => c.trim());
-  });
-}
+  }
 
-async function fetchSheetCsv(sheetId, sheetName) {
-  const url = sheetName
-    ? `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetName)}`
-    : `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv`;
-  const r = await fetch(url);
-  if (!r.ok) return [];
-  const text = await r.text();
-  return parseCsv(text);
-}
+  const phone = rawPhone ? normalizePhone(rawPhone) : '';
+  const today = new Date().toISOString().split('T')[0];
+  const hasComment = !!(comment && comment.trim());
 
-function isThisMonth(dateStr) {
-  if (!dateStr) return false;
-  // пробуем распознать DD.MM.YYYY или YYYY-MM-DD с временем
-  let d = null;
-  const dmy = dateStr.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})/);
-  const ymd = dateStr.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if (dmy) d = new Date(+dmy[3], +dmy[2] - 1, +dmy[1]);
-  else if (ymd) d = new Date(+ymd[1], +ymd[2] - 1, +ymd[3]);
-  if (!d || isNaN(d)) return false;
-  const now = new Date();
-  return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
-}
-
-function avg(nums) {
-  const valid = nums.filter(n => !isNaN(n));
-  if (!valid.length) return null;
-  return +(valid.reduce((a, b) => a + b, 0) / valid.length).toFixed(1);
-}
-
-app.get('/api/admin/stats', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
-
-  const result = {
-    month: new Date().toLocaleDateString('ru-RU', { timeZone: VENUE_TZ, month: 'long', year: 'numeric' }),
-    csi: null,
-    enps: null,
-    visits: null
-  };
-
-  // ── CSI + NPS гостей — теперь из Notion "Отзывы CSI" (раньше была Google-таблица) ──
   try {
-    const monthStart = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-01`;
-    const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_REVIEWS_DB_ID}/query`, {
+    const properties = {
+      'Отзыв': { title: [{ text: { content: `Отзыв — ${today}` } }] },
+      'Дата': { date: { start: today } },
+      'Вечер': { number: Number(vecher) },
+      'Кальян': { number: Number(kalyan) },
+      'Напитки': { number: Number(napitki) },
+      'Еда': { number: Number(eda) },
+      'Команда': { number: Number(komanda) },
+      'NPS': { number: Number(nps) },
+      'Комментарий': { rich_text: [{ text: { content: comment || '' } }] }
+    };
+    if (phone) properties['Телефон'] = { phone_number: phone };
+    if (telegramUsername) properties['Telegram Username'] = { rich_text: [{ text: { content: telegramUsername } }] };
+    if (telegramId) properties['Telegram ID'] = { rich_text: [{ text: { content: String(telegramId) } }] };
+
+    await fetchWithTimeout('https://api.notion.com/v1/pages', {
       method: 'POST',
       headers: NOTION_HEADERS,
-      body: JSON.stringify({ filter: { property: 'Дата', date: { on_or_after: monthStart } } })
+      body: JSON.stringify({ parent: { database_id: NOTION_REVIEWS_DB_ID }, properties })
     });
-    const data = await r.json();
-    const reviews = data.results || [];
 
-    if (reviews.length) {
-      const col = (name) => reviews.map(p => p.properties[name]?.number).filter(n => typeof n === 'number');
-      const nps = col('NPS');
-      const promoters = nps.filter(n => n >= 9).length;
-      const detractors = nps.filter(n => n <= 6).length;
-      const npsScore = nps.length ? Math.round(((promoters - detractors) / nps.length) * 100) : null;
+    // Низкие оценки — заводим отдельные "Проблемы", только если есть комментарий
+    if (hasComment) {
+      const alreadyFlagged = new Set(); // не заводим два "Общее" из-за вечера И низкого NPS одновременно
 
-      result.csi = {
-        count: reviews.length,
-        vecher: avg(col('Вечер')),
-        kalyan: avg(col('Кальян')),
-        napitki: avg(col('Напитки')),
-        eda: avg(col('Еда')),
-        komanda: avg(col('Команда')),
-        nps: npsScore
-      };
-    }
-  } catch (e) { console.error('CSI fetch failed:', e); }
-
-  // ── eNPS сотрудников — теперь из Notion "Отзывы eNPS" (анонимно, раньше была Google-таблица) ──
-  try {
-    const monthStart = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-01`;
-    const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_ENPS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({ filter: { property: 'Дата', date: { on_or_after: monthStart } } })
-    });
-    const data = await r.json();
-    const entries = data.results || [];
-
-    if (entries.length) {
-      const scores = entries.map(p => p.properties['Оценка']?.number).filter(n => typeof n === 'number');
-      const promoters = scores.filter(n => n >= 9).length;
-      const detractors = scores.filter(n => n <= 6).length;
-      const enpsScore = scores.length ? Math.round(((promoters - detractors) / scores.length) * 100) : null;
-
-      result.enps = {
-        count: entries.length,
-        score: enpsScore,
-        promoters,
-        passives: scores.length - promoters - detractors,
-        detractors
-      };
-    }
-  } catch (e) { console.error('eNPS fetch failed:', e); }
-
-  // ── Визиты за месяц из Notion ──
-  try {
-    const now = new Date();
-    const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
-
-    const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_VISITS_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({
-        filter: { property: 'Дата', date: { on_or_after: monthStart } },
-        page_size: 100
-      })
-    });
-    const data = await r.json();
-    const visits = data.results || [];
-
-    const guestCounts = {};
-    const hookahCounts = {};
-    const weekHookahCounts = {};
-    const weekAgo = new Date();
-    weekAgo.setDate(weekAgo.getDate() - 7);
-
-    for (const v of visits) {
-      const guestRelId = v.properties['Гость']?.relation?.[0]?.id;
-      if (guestRelId) guestCounts[guestRelId] = (guestCounts[guestRelId] || 0) + 1;
-      const hookah = v.properties['Кальян']?.rich_text?.[0]?.plain_text;
-      const visitDate = v.properties['Дата']?.date?.start;
-      if (hookah) {
-        hookahCounts[hookah] = (hookahCounts[hookah] || 0) + 1;
-        if (visitDate && new Date(visitDate) >= weekAgo) {
-          weekHookahCounts[hookah] = (weekHookahCounts[hookah] || 0) + 1;
+      for (const [key, category] of Object.entries(REVIEW_CATEGORY_MAP)) {
+        const score = Number(scores[key]);
+        if (score <= 3 && !alreadyFlagged.has(category)) {
+          alreadyFlagged.add(category);
+          await fetchWithTimeout('https://api.notion.com/v1/pages', {
+            method: 'POST',
+            headers: NOTION_HEADERS,
+            body: JSON.stringify({
+              parent: { database_id: NOTION_PROBLEMS_DB_ID },
+              properties: {
+                'Проблема': { title: [{ text: { content: `${category} — низкая оценка гостя (${score}/10)` } }] },
+                'Категория': { select: { name: category } },
+                'Оценка гостя': { number: score },
+                'Комментарий гостя': { rich_text: [{ text: { content: comment } }] },
+                'Дата отзыва': { date: { start: today } },
+                'Статус': { select: { name: 'Задачи' } },
+                'Критичность': { select: { name: 'Высокая' } },
+                'Ответственный': { rich_text: [{ text: { content: 'Администратор' } }] },
+                'Срок исполнения': { date: { start: reviewDeadline(3) } }
+              }
+            })
+          });
         }
+      }
+
+      // Низкий NPS (0-6, "критик") — сигнал общего недовольства, даже если по категориям всё ок
+      const npsScore = Number(nps);
+      if (npsScore <= 6 && !alreadyFlagged.has('Общее')) {
+        await fetchWithTimeout('https://api.notion.com/v1/pages', {
+          method: 'POST',
+          headers: NOTION_HEADERS,
+          body: JSON.stringify({
+            parent: { database_id: NOTION_PROBLEMS_DB_ID },
+            properties: {
+              'Проблема': { title: [{ text: { content: `Общее — гость не порекомендует нас (NPS ${npsScore}/10)` } }] },
+              'Категория': { select: { name: 'Общее' } },
+              'Оценка гостя': { number: npsScore },
+              'Комментарий гостя': { rich_text: [{ text: { content: comment } }] },
+              'Дата отзыва': { date: { start: today } },
+              'Статус': { select: { name: 'Задачи' } },
+              'Критичность': { select: { name: 'Высокая' } },
+              'Ответственный': { rich_text: [{ text: { content: 'Администратор' } }] },
+              'Срок исполнения': { date: { start: reviewDeadline(3) } }
+            }
+          })
+        });
       }
     }
 
-    const topHookah = Object.entries(hookahCounts).sort((a, b) => b[1] - a[1])[0];
-    const weekTopHookahs = Object.entries(weekHookahCounts)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([flavor, count]) => ({ flavor, count }));
+    if (telegramId) {
+      await sendTelegramMessage(telegramId, 'Спасибо за отзыв! Он реально помогает нам становиться лучше 🙏');
+    }
 
-    result.visits = {
-      total: visits.length,
-      uniqueGuests: Object.keys(guestCounts).length,
-      topHookah: topHookah ? topHookah[0] : null,
-      weekTopHookahs
-    };
-  } catch (e) { console.error('Visits stats failed:', e); }
-
-  res.json(result);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to save review' });
+  }
 });
 
-// ─── ДЕСКТОП: НЕДЕЛЬНАЯ ДИНАМИКА (CSI/NPS/eNPS/визиты) ─
-// Для графика и сравнения "эта неделя vs прошлая" на десктопной панели.
-// Неделя считается с понедельника — так же, как в графике смен.
-app.get('/api/admin/stats-weekly', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
-  const WEEKS_BACK = 8;
+// ─── HELPERS ──────────────────────────────────────
 
-  function weekMonday(dateStr) {
-    const d = new Date(dateStr);
-    const day = (d.getDay() + 6) % 7; // 0 = Пн
-    d.setDate(d.getDate() - day);
-    return d.toISOString().split('T')[0];
+async function findGuestByPhone(phone) {
+  const normalized = normalizePhone(phone);
+  const res = await fetchWithTimeout(`https://api.notion.com/v1/databases/${NOTION_GUESTS_DB_ID}/query`, {
+    method: 'POST',
+    headers: NOTION_HEADERS,
+    body: JSON.stringify({
+      filter: { property: 'Телефон', phone_number: { equals: normalized } }
+    })
+  });
+  const data = await res.json();
+  return data.results?.[0] || null;
+}
+
+// ─── ЗАЩИТА ОТ "ПОТЕРЯННЫХ" ОБНОВЛЕНИЙ ИСТОРИИ БРОНИ ────
+// "История броней" хранится одним текстовым полем целиком: любое действие
+// (подтвердить/отменить/перенести/назначить стол/новая бронь) сначала читает
+// это поле, потом пишет его целиком обратно. Если для ОДНОГО И ТОГО ЖЕ гостя
+// два таких действия идут почти одновременно — например, в панели стаф-приложения
+// сначала назначили стол, а через секунду нажали "Подтвердить" (особенно на
+// мобильном интернете, где запросы летят медленнее и могут прийти вперемешку) —
+// то действие, которое ЗАВЕРШИТСЯ записью позже, перезатрёт историю поверх
+// результата более раннего, будто того действия не было. При этом оба запроса
+// к этому моменту уже могли отчитаться "успех" и разослать уведомления —
+// баг был именно такой: "подтверждено" пришло, а в списке броней снова "ожидает".
+// Чтобы это исключить, все операции с историей одного гостя выстраиваем в
+// очередь по номеру телефона: следующая начинает читать историю только после
+// того как предыдущая для этого же гостя полностью завершила запись.
+const guestLocks = new Map(); // normalizedPhone -> "хвост" очереди (Promise)
+function withGuestLock(phone, fn) {
+  const key = normalizePhone(phone);
+  const prev = guestLocks.get(key) || Promise.resolve();
+  // .then(fn, fn) — следующее действие стартует после предыдущего независимо от
+  // того, упало оно или нет, чтобы одна неудачная операция не заблокировала
+  // навсегда очередь для этого гостя.
+  const run = prev.then(fn, fn);
+  guestLocks.set(key, run.catch(() => {}));
+  return run;
+}
+
+// Общая функция отмены брони — используется и из мини-аппа, и из кнопки в Telegram
+function cancelBookingInternal(phone, entry, customMessage) {
+  return withGuestLock(phone, () => cancelBookingUnlocked(phone, entry, customMessage));
+}
+async function cancelBookingUnlocked(phone, entry, customMessage) {
+  const guest = await findGuestByPhone(phone);
+  if (!guest) return { ok: false, error: 'guest not found' };
+
+  const props = guest.properties;
+  const historyText = props['История броней']?.rich_text?.[0]?.plain_text || '';
+  const entries = historyText.split(',').map(s => s.trim());
+
+  // Ищем запись по "голому" тексту (без суффикса статуса) — раньше сравнивали
+  // только после снятия "(подтверждено)", теряя совпадение, если запись почему-то
+  // уже была отменена или отмечена иначе. И, что важнее, раньше НЕ проверяли,
+  // нашлась ли вообще запись — если нет, число броней всё равно тихо уменьшалось,
+  // а гостю могло уйти "бронь отменена" для брони, которая на деле не менялась.
+  let matched = false;
+  const updatedEntries = entries.map(e => {
+    if (stripSuffix(e) !== entry) return e;
+    matched = true;
+    return e.includes(' (отменено)') ? e : `${stripSuffix(e)} (отменено)`;
+  });
+
+  if (!matched) return { ok: false, notFound: true };
+
+  const newHistory = updatedEntries.join(', ');
+  const currentCount = props['Количество броней']?.number || 0;
+
+  await fetchWithTimeout(`https://api.notion.com/v1/pages/${guest.id}`, {
+    method: 'PATCH',
+    headers: NOTION_HEADERS,
+    body: JSON.stringify({
+      properties: {
+        'История броней': { rich_text: [{ text: { content: newHistory.slice(0, 1900) } }] },
+        'Количество броней': { number: Math.max(0, currentCount - 1) }
+      }
+    })
+  });
+
+  const guestName = props['Имя']?.title?.[0]?.plain_text || 'Гость';
+  const telegramId = props['Telegram ID']?.rich_text?.[0]?.plain_text;
+
+  if (telegramId) {
+    const text = customMessage || `Бронирование отменено. Будем рады видеть вас в следующий раз.\n\n🗓 ${displayEntry(entry)}`;
+    await sendTelegramMessage(telegramId, text);
   }
-  function npsFromVals(vals) {
-    if (!vals.length) return null;
-    const promoters = vals.filter(n => n >= 9).length;
-    const detractors = vals.filter(n => n <= 6).length;
-    return Math.round(((promoters - detractors) / vals.length) * 100);
-  }
 
-  try {
-    const since = new Date();
-    since.setDate(since.getDate() - WEEKS_BACK * 7);
-    const sinceISO = since.toISOString().split('T')[0];
+  return { ok: true, guestName, telegramId };
+}
 
-    const [reviewsRes, enpsRes, visitsRes] = await Promise.all([
-      fetch(`https://api.notion.com/v1/databases/${NOTION_REVIEWS_DB_ID}/query`, {
-        method: 'POST', headers: NOTION_HEADERS,
-        body: JSON.stringify({ filter: { property: 'Дата', date: { on_or_after: sinceISO } }, page_size: 100 })
-      }),
-      fetch(`https://api.notion.com/v1/databases/${NOTION_ENPS_DB_ID}/query`, {
-        method: 'POST', headers: NOTION_HEADERS,
-        body: JSON.stringify({ filter: { property: 'Дата', date: { on_or_after: sinceISO } }, page_size: 100 })
-      }),
-      fetch(`https://api.notion.com/v1/databases/${NOTION_VISITS_DB_ID}/query`, {
-        method: 'POST', headers: NOTION_HEADERS,
-        body: JSON.stringify({ filter: { property: 'Дата', date: { on_or_after: sinceISO } }, page_size: 100 })
+// Помечаем бронь как подтверждённую в истории (используется при нажатии "✅ Подтвердить")
+function confirmBookingInternal(phone, entry) {
+  return withGuestLock(phone, () => confirmBookingUnlocked(phone, entry));
+}
+async function confirmBookingUnlocked(phone, entry) {
+  const guest = await findGuestByPhone(phone);
+  if (!guest) return { ok: false };
+
+  const props = guest.properties;
+  const historyText = props['История броней']?.rich_text?.[0]?.plain_text || '';
+  const entries = historyText.split(',').map(s => s.trim());
+
+  // Как и в отмене: сравниваем по "голому" тексту и явно фиксируем, нашлась ли
+  // запись, вместо того чтобы молча вернуть "успех", ничего не изменив (именно
+  // это раньше маскировало гонку — Telegram-уведомление гостю уходило, даже
+  // если запись, которую нужно было пометить, реально не совпала).
+  let matched = false;
+  const updatedEntries = entries.map(e => {
+    if (stripSuffix(e) !== entry) return e;
+    matched = true;
+    return e.includes(' (подтверждено)') ? e : `${stripSuffix(e)} (подтверждено)`;
+  });
+
+  if (!matched) return { ok: false, notFound: true };
+
+  const newHistory = updatedEntries.join(', ');
+
+  await fetchWithTimeout(`https://api.notion.com/v1/pages/${guest.id}`, {
+    method: 'PATCH',
+    headers: NOTION_HEADERS,
+    body: JSON.stringify({
+      properties: {
+        'История броней': { rich_text: [{ text: { content: newHistory.slice(0, 1900) } }] }
+      }
+    })
+  });
+
+  return { ok: true };
+}
+
+// Переносим бронь на новую дату/время (форс-мажор, гость сам попросил и т.п.) —
+// сохраняем тип (стол/VIP/мероприятие) и комнату/название мероприятия, меняем только когда.
+function extractSuffix(display) {
+  const parts = display.split(' · ');
+  return parts.length > 1 ? ' · ' + parts.slice(1).join(' · ') : '';
+}
+
+// "2026-08-25" → "25.08.2026" — чтобы дата при переносе брони через бота показывалась
+// гостю и админу в привычном формате, а не в сыром ISO-виде (YYYY-MM-DD).
+function formatDateRu(isoDate) {
+  const [y, m, d] = isoDate.split('-');
+  return `${d}.${m}.${y}`;
+}
+
+function editBookingInternal(phone, oldEntry, newDateISO, newTime, newGuests, newComment) {
+  return withGuestLock(phone, () => editBookingUnlocked(phone, oldEntry, newDateISO, newTime, newGuests, newComment));
+}
+async function editBookingUnlocked(phone, oldEntry, newDateISO, newTime, newGuests, newComment) {
+  const guest = await findGuestByPhone(phone);
+  if (!guest) return { ok: false };
+
+  const props = guest.properties;
+  const historyText = props['История броней']?.rich_text?.[0]?.plain_text || '';
+  const entries = historyText.split(',').map(s => s.trim());
+
+  const parsed = parseEntry(oldEntry);
+  const suffix = extractSuffix(parsed.display);
+  const newDisplayText = `${formatDateRu(newDateISO)} ${newTime}${suffix}`;
+  const newIsoDateTime = `${newDateISO}T${newTime}:00`;
+  // Если гостей/комментарий не передали явно — сохраняем то, что было в старой записи
+  const guestsOut = newGuests !== undefined && newGuests !== null ? String(newGuests).replace(/\D/g, '').slice(0, 4) : (parsed.guests !== null ? String(parsed.guests) : '');
+  const commentOut = newComment !== undefined ? sanitizeBookingComment(newComment) : (parsed.comment || '');
+  // Стол при обычном редактировании (дата/время/гости/комментарий) не трогаем — сохраняем как был.
+  const newEntry = `${newIsoDateTime}|${newDisplayText}|${parsed.kind}|${parsed.uid}|${guestsOut}|${commentOut}|${parsed.table || ''}`;
+
+  let matched = false;
+  const updatedEntries = entries.map(e => {
+    if (stripSuffix(e) !== oldEntry) return e;
+    matched = true;
+    return `${newEntry} (подтверждено)`;
+  });
+
+  if (!matched) return { ok: false, notFound: true };
+
+  const newHistory = updatedEntries.join(', ');
+
+  await fetchWithTimeout(`https://api.notion.com/v1/pages/${guest.id}`, {
+    method: 'PATCH',
+    headers: NOTION_HEADERS,
+    body: JSON.stringify({
+      properties: {
+        'История броней': { rich_text: [{ text: { content: newHistory.slice(0, 1900) } }] }
+      }
+    })
+  });
+
+  const guestName = props['Имя']?.title?.[0]?.plain_text || 'Гость';
+  const telegramId = props['Telegram ID']?.rich_text?.[0]?.plain_text;
+
+  return { ok: true, guestName, telegramId, newEntry, newDisplayText };
+}
+
+// Назначаем/меняем физический стол у брони — это чисто внутренняя пометка для
+// персонала (куда сажать гостя), не связана со статусом подтверждения и не
+// требует уведомления гостя, поэтому Telegram-сообщение сюда не шлём.
+function assignTableInternal(phone, entry, table) {
+  return withGuestLock(phone, () => assignTableUnlocked(phone, entry, table));
+}
+async function assignTableUnlocked(phone, entry, table) {
+  const guest = await findGuestByPhone(phone);
+  if (!guest) return { ok: false };
+
+  const props = guest.properties;
+  const historyText = props['История броней']?.rich_text?.[0]?.plain_text || '';
+  const entries = historyText.split(',').map(s => s.trim());
+  const cleanTable = sanitizeTableLabel(table);
+
+  let matchedNewEntry = null;
+  const updatedEntries = entries.map(e => {
+    if (stripSuffix(e) !== entry) return e;
+    const suffix = e.includes(' (подтверждено)') ? ' (подтверждено)' : (e.includes(' (отменено)') ? ' (отменено)' : '');
+    const parsed = parseEntry(e);
+    const guestsOut = parsed.guests !== null ? String(parsed.guests) : '';
+    const newBase = `${parsed.iso || ''}|${parsed.display}|${parsed.kind}|${parsed.uid || ''}|${guestsOut}|${parsed.comment || ''}|${cleanTable}`;
+    matchedNewEntry = newBase;
+    return `${newBase}${suffix}`;
+  });
+
+  if (!matchedNewEntry) return { ok: false, notFound: true };
+
+  const newHistory = updatedEntries.join(', ');
+  await fetchWithTimeout(`https://api.notion.com/v1/pages/${guest.id}`, {
+    method: 'PATCH',
+    headers: NOTION_HEADERS,
+    body: JSON.stringify({
+      properties: {
+        'История броней': { rich_text: [{ text: { content: newHistory.slice(0, 1900) } }] }
+      }
+    })
+  });
+
+  return { ok: true, newEntry: matchedNewEntry };
+}
+
+// Вносим бронь вручную (гость позвонил и договорился по телефону) — от лица
+// персонала, а не гостя из мини-аппа. В отличие от /api/booking, сразу
+// помечаем запись как подтверждённую (сотрудник уже поговорил с гостём) и
+// используем свой Источник ("Телефон"), чтобы потом можно было отличить канал.
+function createManualBookingInternal({ name, phone: rawPhone, dateISO, time, guests, comment, table }) {
+  return withGuestLock(rawPhone, () => createManualBookingUnlocked({ name, phone: rawPhone, dateISO, time, guests, comment, table }));
+}
+async function createManualBookingUnlocked({ name, phone: rawPhone, dateISO, time, guests, comment, table }) {
+  const phone = normalizePhone(rawPhone);
+  const existing = await findGuestByPhone(phone);
+
+  const displayText = `${formatDateRu(dateISO)} ${time}`;
+  const kind = 'table';
+  const uid = crypto.randomUUID().slice(0, 8);
+  const isoTime = /^\d{2}:\d{2}$/.test(time) ? time : '00:00';
+  const isoDateTime = `${dateISO}T${isoTime}:00`;
+  const guestsField = guests ? String(guests).replace(/\D/g, '').slice(0, 4) : '';
+  const commentField = sanitizeBookingComment(comment);
+  const tableField = sanitizeTableLabel(table);
+  const bookingEntry = `${isoDateTime}|${displayText}|${kind}|${uid}|${guestsField}|${commentField}|${tableField}`;
+  const confirmedEntry = `${bookingEntry} (подтверждено)`;
+
+  if (existing) {
+    const props = existing.properties;
+    const currentCount = props['Количество броней']?.number || 0;
+    const existingHistory = props['История броней']?.rich_text?.[0]?.plain_text || '';
+    const newHistory = existingHistory ? `${existingHistory}, ${confirmedEntry}` : confirmedEntry;
+
+    await fetchWithTimeout(`https://api.notion.com/v1/pages/${existing.id}`, {
+      method: 'PATCH',
+      headers: NOTION_HEADERS,
+      body: JSON.stringify({
+        properties: {
+          'Количество броней': { number: currentCount + 1 },
+          'История броней': { rich_text: [{ text: { content: newHistory.slice(0, 1900) } }] }
+        }
       })
-    ]);
-    const reviews = (await reviewsRes.json()).results || [];
-    const enpsEntries = (await enpsRes.json()).results || [];
-    const visits = (await visitsRes.json()).results || [];
-
-    const buckets = {};
-    const ensure = (wk) => buckets[wk] || (buckets[wk] = { csiSum: 0, csiCount: 0, npsVals: [], enpsVals: [], visits: 0 });
-
-    for (const p of reviews) {
-      const date = p.properties['Дата']?.date?.start;
-      if (!date) continue;
-      const b = ensure(weekMonday(date));
-      const cats = ['Вечер', 'Кальян', 'Напитки', 'Еда', 'Команда']
-        .map(k => p.properties[k]?.number).filter(n => typeof n === 'number');
-      if (cats.length) { b.csiSum += cats.reduce((a, c) => a + c, 0) / cats.length; b.csiCount++; }
-      const nps = p.properties['NPS']?.number;
-      if (typeof nps === 'number') b.npsVals.push(nps);
-    }
-    for (const p of enpsEntries) {
-      const date = p.properties['Дата']?.date?.start;
-      if (!date) continue;
-      const score = p.properties['Оценка']?.number;
-      if (typeof score === 'number') ensure(weekMonday(date)).enpsVals.push(score);
-    }
-    for (const v of visits) {
-      const date = v.properties['Дата']?.date?.start;
-      if (date) ensure(weekMonday(date)).visits++;
-    }
-
-    const series = Object.keys(buckets).sort().map(wk => {
-      const b = buckets[wk];
-      return {
-        week: wk,
-        csi: b.csiCount ? Math.round((b.csiSum / b.csiCount) * 10) / 10 : null,
-        nps: npsFromVals(b.npsVals),
-        enps: npsFromVals(b.enpsVals),
-        visits: b.visits
-      };
     });
+  } else {
+    const properties = {
+      'Имя': { title: [{ text: { content: name } }] },
+      'Телефон': { phone_number: phone },
+      'Источник': { select: { name: 'Телефон' } },
+      'Дата первого контакта': { date: { start: new Date().toISOString().split('T')[0] } },
+      'Количество броней': { number: 1 },
+      'История броней': { rich_text: [{ text: { content: confirmedEntry } }] },
+      'Перенесён в Карточку Гостя': { checkbox: false }
+    };
 
-    res.json({ weeks: series });
+    await fetchWithTimeout('https://api.notion.com/v1/pages', {
+      method: 'POST',
+      headers: NOTION_HEADERS,
+      body: JSON.stringify({ parent: { database_id: NOTION_GUESTS_DB_ID }, properties })
+    });
+  }
+
+  return { ok: true, entry: bookingEntry, display: displayText };
+}
+
+// ─── ВНУТРЕННИЕ ЭНДПОИНТЫ ДЛЯ ПАНЕЛИ СТАФ-ПРИЛОЖЕНИЯ ──
+// Стаф-бэкенд (другой бот, свой PIN) не может сам написать гостю — у него нет
+// чата с гостевым ботом. Поэтому подтверждение/отмена/перенос брони из панели
+// идут сюда: здесь и пишем в Notion, и (если получится) шлём гостю то же
+// сообщение, что и при нажатии кнопки в Telegram. Отвечаем { ok, notified } —
+// notified:false означает "в Notion записалось, а гостю не долетело", чтобы
+// админ не думал, что гость точно предупреждён, если это не так.
+
+function checkInternalKey(req, res) {
+  if (!INTERNAL_ADMIN_KEY || req.headers['x-internal-key'] !== INTERNAL_ADMIN_KEY) {
+    res.status(401).json({ error: 'unauthorized' });
+    return false;
+  }
+  return true;
+}
+
+app.post('/api/internal/booking/confirm', async (req, res) => {
+  if (!checkInternalKey(req, res)) return;
+  const { phone: rawPhone, entry } = req.body;
+  const phone = normalizePhone(rawPhone);
+  if (!phone || !entry) return res.status(400).json({ error: 'phone and entry required' });
+
+  try {
+    const result = await confirmBookingInternal(phone, entry);
+    if (!result.ok) return res.status(404).json({ error: result.notFound ? 'booking not found' : 'guest not found' });
+
+    const guest = await findGuestByPhone(phone);
+    const telegramId = guest?.properties?.['Telegram ID']?.rich_text?.[0]?.plain_text;
+    let notified = false;
+    if (telegramId) {
+      const sent = await sendTelegramMessage(telegramId, `🎉 Бронь подтверждена! Ждём вас.\n\n🗓 ${displayEntry(entry)}`);
+      notified = !!(sent && sent.ok);
+    }
+    res.json({ ok: true, notified });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Failed to fetch weekly stats' });
+    res.status(500).json({ error: 'Failed to confirm' });
   }
 });
 
-// ─── ДЕСКТОП: ЕДИНАЯ ТАБЛИЦА ГОСТЕЙ (с RFM-меткой) ──────
-// Объединяет то, что на мобильном разнесено по отдельным карточкам
-// (Недавние/VIP/Давно не было), в одну таблицу с фильтрами на клиенте.
-app.get('/api/admin/guests-table', async (req, res) => {
-  if (!(await checkAdminPin(req, res))) return;
+app.post('/api/internal/booking/cancel', async (req, res) => {
+  if (!checkInternalKey(req, res)) return;
+  const { phone: rawPhone, entry, message } = req.body;
+  const phone = normalizePhone(rawPhone);
+  if (!phone || !entry) return res.status(400).json({ error: 'phone and entry required' });
 
   try {
-    const guestsRes = await fetch(`https://api.notion.com/v1/databases/${NOTION_GUESTS_DB_ID}/query`, {
-      method: 'POST', headers: NOTION_HEADERS,
-      body: JSON.stringify({ sorts: [{ property: 'Имя Гостя', direction: 'ascending' }], page_size: 100 })
-    });
-    const guests = (await guestsRes.json()).results || [];
-
-    const visitsRes = await fetch(`https://api.notion.com/v1/databases/${NOTION_VISITS_DB_ID}/query`, {
-      method: 'POST', headers: NOTION_HEADERS,
-      body: JSON.stringify({ sorts: [{ property: 'Дата', direction: 'descending' }], page_size: 100 })
-    });
-    const visitsData = await visitsRes.json();
-    const lastVisitByGuest = {};
-    for (const v of visitsData.results || []) {
-      const guestId = v.properties['Гость']?.relation?.[0]?.id;
-      const date = v.properties['Дата']?.date?.start;
-      if (guestId && date && !lastVisitByGuest[guestId]) lastVisitByGuest[guestId] = date;
-    }
-
-    const now = new Date();
-    const rows = guests.map(g => {
-      const lastVisit = lastVisitByGuest[g.id] || null;
-      const daysSince = lastVisit ? Math.floor((now - new Date(lastVisit)) / (1000 * 60 * 60 * 24)) : null;
-      const status = g.properties['Частота визитов']?.select?.name || '';
-      // Риск оттока — только для тех, кого мы обычно ждём регулярно (VIP/Постоянный)
-      const atRisk = (status === 'VIP' || status === 'Постоянный') && (daysSince === null || daysSince >= 30);
-      return {
-        id: g.id,
-        name: g.properties['Имя Гостя']?.title?.[0]?.plain_text || '',
-        phone: g.properties['Телефон']?.phone_number || '',
-        status,
-        lastVisit,
-        daysSince,
-        atRisk
-      };
-    });
-
-    res.json(rows);
+    const result = await cancelBookingInternal(phone, entry, message);
+    if (!result.ok) return res.status(404).json({ error: result.notFound ? 'booking not found' : 'guest not found' });
+    res.json({ ok: true, notified: !!result.telegramId });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Failed to fetch guests table' });
+    res.status(500).json({ error: 'Failed to cancel' });
   }
+});
+
+app.post('/api/internal/booking/edit', async (req, res) => {
+  if (!checkInternalKey(req, res)) return;
+  const { phone: rawPhone, entry, dateISO, time, guests, comment } = req.body;
+  const phone = normalizePhone(rawPhone);
+  if (!phone || !entry || !dateISO || !time) {
+    return res.status(400).json({ error: 'phone, entry, dateISO and time required' });
+  }
+
+  try {
+    const result = await editBookingInternal(phone, entry, dateISO, time, guests, comment);
+    if (!result.ok) return res.status(404).json({ error: result.notFound ? 'booking not found' : 'guest not found' });
+
+    let notified = false;
+    if (result.telegramId) {
+      const sent = await sendTelegramMessage(
+        result.telegramId,
+        `Бронь изменена администратором.\n\n🗓 Новое время: ${result.newDisplayText}\n\nЖдём вас!`
+      );
+      notified = !!(sent && sent.ok);
+    }
+    res.json({ ok: true, notified, newEntry: result.newEntry, newDisplayText: result.newDisplayText });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to edit' });
+  }
+});
+
+app.post('/api/internal/booking/create', async (req, res) => {
+  if (!checkInternalKey(req, res)) return;
+  const { name, phone, dateISO, time, guests, comment, table } = req.body;
+  if (!name || !phone || !dateISO || !time) {
+    return res.status(400).json({ error: 'name, phone, dateISO and time required' });
+  }
+
+  try {
+    const result = await createManualBookingInternal({ name, phone, dateISO, time, guests, comment, table });
+    res.json({ ok: true, entry: result.entry, display: result.display });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to create booking' });
+  }
+});
+
+app.post('/api/internal/booking/table', async (req, res) => {
+  if (!checkInternalKey(req, res)) return;
+  const { phone: rawPhone, entry, table } = req.body;
+  const phone = normalizePhone(rawPhone);
+  if (!phone || !entry) return res.status(400).json({ error: 'phone and entry required' });
+
+  try {
+    const result = await assignTableInternal(phone, entry, table);
+    if (!result.ok) return res.status(404).json({ error: result.notFound ? 'booking not found' : 'guest not found' });
+    res.json({ ok: true, newEntry: result.newEntry });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to assign table' });
+  }
+});
+
+// ─── BOOKING → GUESTS DB + УВЕДОМЛЕНИЯ ────────────
+
+app.post('/api/booking', async (req, res) => {
+  const { name, phone: rawPhone, date, dateISO, time, guests, comment, room, eventName, telegramId, telegramUsername } = req.body;
+  const phone = normalizePhone(rawPhone);
+
+  if (!name || !phone) {
+    return res.status(400).json({ error: 'name and phone required' });
+  }
+
+  try {
+    let displayText = date ? `${date}${time ? ' ' + time : ''}` : new Date().toISOString().split('T')[0];
+    if (room) displayText += ` · ${room}`;
+    else if (eventName) displayText += ` · ${eventName}`;
+
+    const kind = room ? 'vip' : (eventName ? `event:${eventName}` : 'table');
+    const uid = crypto.randomUUID().slice(0, 8); // делает каждую бронь уникальной, даже если дата/время/тип совпали с прошлой
+
+    const isoTime = time && /^\d{2}:\d{2}$/.test(time) ? time : '00:00';
+    const isoDateTime = dateISO ? `${dateISO}T${isoTime}:00` : '';
+    const guestsField = guests ? String(guests).replace(/\D/g, '').slice(0, 4) : '';
+    const commentField = sanitizeBookingComment(comment);
+    const bookingEntry = `${isoDateTime}|${displayText}|${kind}|${uid}|${guestsField}|${commentField}`;
+
+    const properties = {};
+    if (telegramId) properties['Telegram ID'] = { rich_text: [{ text: { content: String(telegramId) } }] };
+    if (telegramUsername) properties['Telegram Username'] = { rich_text: [{ text: { content: telegramUsername } }] };
+
+    // Читаем и переписываем "Историю броней"/"Количество броней" под замком по
+    // телефону — иначе бронь из мини-аппа и параллельное действие персонала
+    // (подтвердить/отменить/назначить стол) над тем же гостем могут столкнуться
+    // и одна запись потеряется (см. комментарий у withGuestLock выше).
+    const existedBefore = await withGuestLock(phone, async () => {
+      const existing = await findGuestByPhone(phone);
+      if (existing) {
+        const currentCount = existing.properties['Количество броней']?.number || 0;
+        const existingHistory = existing.properties['История броней']?.rich_text?.[0]?.plain_text || '';
+        const newHistory = existingHistory ? `${existingHistory}, ${bookingEntry}` : bookingEntry;
+
+        properties['Количество броней'] = { number: currentCount + 1 };
+        properties['История броней'] = { rich_text: [{ text: { content: newHistory.slice(0, 1900) } }] };
+
+        await fetchWithTimeout(`https://api.notion.com/v1/pages/${existing.id}`, {
+          method: 'PATCH',
+          headers: NOTION_HEADERS,
+          body: JSON.stringify({ properties })
+        });
+        return true;
+      }
+
+      properties['Имя'] = { title: [{ text: { content: name } }] };
+      properties['Телефон'] = { phone_number: phone };
+      properties['Источник'] = { select: { name: 'Бронь' } };
+      properties['Дата первого контакта'] = { date: { start: new Date().toISOString().split('T')[0] } };
+      properties['Количество броней'] = { number: 1 };
+      properties['История броней'] = { rich_text: [{ text: { content: bookingEntry } }] };
+      properties['Перенесён в Карточку Гостя'] = { checkbox: false };
+
+      await fetchWithTimeout('https://api.notion.com/v1/pages', {
+        method: 'POST',
+        headers: NOTION_HEADERS,
+        body: JSON.stringify({ parent: { database_id: NOTION_GUESTS_DB_ID }, properties })
+      });
+      return false;
+    });
+
+    const details = formatBookingDetails({ name, phone, date, time, guests, comment, room, eventName });
+
+    if (telegramId) {
+      const roomLine = room ? `🔺 ${room}\n` : '';
+      const eventLine = eventName ? `🎉 ${eventName}\n` : '';
+      const guestSummary = `${roomLine}${eventLine}🗓 ${date || '—'} в ${time || '—'}\n👥 Гостей: ${guests || '—'}`;
+      await sendTelegramMessage(
+        telegramId,
+        `✅ Приняли бронь! Как только администратор подтвердит, мы свяжемся с вами.\n\n${guestSummary}`
+      );
+    }
+
+    const bookingId = crypto.randomUUID().slice(0, 8);
+    bookingsMap.set(bookingId, { phone, entry: bookingEntry, telegramId: telegramId || null, telegramUsername: telegramUsername || null, name, confirmed: false });
+
+    let contactLine;
+    if (telegramUsername) {
+      contactLine = `\n\n💬 Написать гостю: https://t.me/${telegramUsername}`;
+    } else if (telegramId) {
+      contactLine = `\n\n📩 Гость получил подтверждение от бота (у него нет username)`;
+    } else {
+      contactLine = `\n\n📱 Гость вне Telegram — бот не смог ему написать, свяжитесь по номеру телефона`;
+    }
+
+    let titleLine = '📅 Новая бронь!';
+    if (room) titleLine = '📅 Новая бронь VIP-комнаты!';
+    if (eventName) titleLine = '🎉 Бронь на мероприятие!';
+
+    await sendTelegramMessage(
+      ADMIN_CHAT_ID,
+      `${titleLine}\n\n${details}${contactLine}`,
+      {
+        inline_keyboard: [[
+          { text: '✅ Подтвердить', callback_data: `confirm:${bookingId}` },
+          { text: '❌ Отменить', callback_data: `cancel_ask:${bookingId}` }
+        ], [
+          { text: '✏️ Изменить', callback_data: `edit_ask:${bookingId}` }
+        ]]
+      }
+    );
+
+    res.json({ status: existedBefore ? 'updated' : 'created' });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to save booking' });
+  }
+});
+
+// ─── ОТМЕНА БРОНИ ГОСТЕМ ИЛИ АДМИНОМ ЧЕРЕЗ ПРИЛОЖЕНИЕ ──
+
+app.post('/api/booking/cancel', async (req, res) => {
+  const { phone: rawPhone, entry } = req.body;
+  const phone = normalizePhone(rawPhone);
+
+  if (!phone || !entry) {
+    return res.status(400).json({ error: 'phone and entry required' });
+  }
+
+  try {
+    const result = await cancelBookingInternal(phone, entry);
+    if (!result.ok) return res.status(404).json({ error: 'guest not found' });
+
+    await sendTelegramMessage(ADMIN_CHAT_ID, `❌ Бронь отменена\n\n👤 ${result.guestName}\n📱 ${phone}\n🗓 ${displayEntry(entry)}`);
+
+    res.json({ status: 'cancelled' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to cancel booking' });
+  }
+});
+
+// ─── PROFILE → UPSERT BY PHONE ────────────────────
+
+app.post('/api/profile', async (req, res) => {
+  const { name, username, phone: rawPhone, birthday, telegramId } = req.body;
+  const phone = normalizePhone(rawPhone);
+
+  if (!phone) {
+    return res.status(400).json({ error: 'phone required' });
+  }
+
+  try {
+    const existing = await findGuestByPhone(phone);
+
+    const properties = {};
+    if (birthday) properties['Дата рождения'] = { date: { start: birthday } };
+    if (username) properties['Telegram Username'] = { rich_text: [{ text: { content: username } }] };
+    if (telegramId) properties['Telegram ID'] = { rich_text: [{ text: { content: String(telegramId) } }] };
+    if (name) properties['Имя'] = { title: [{ text: { content: name } }] };
+
+    if (existing) {
+      await fetchWithTimeout(`https://api.notion.com/v1/pages/${existing.id}`, {
+        method: 'PATCH',
+        headers: NOTION_HEADERS,
+        body: JSON.stringify({ properties })
+      });
+      return res.json({ status: 'updated', id: existing.id });
+    }
+
+    properties['Имя'] = { title: [{ text: { content: name || 'Гость' } }] };
+    properties['Телефон'] = { phone_number: phone };
+    properties['Источник'] = { select: { name: 'Другое' } };
+    properties['Дата первого контакта'] = { date: { start: new Date().toISOString().split('T')[0] } };
+    properties['Количество броней'] = { number: 0 };
+
+    const createRes = await fetchWithTimeout('https://api.notion.com/v1/pages', {
+      method: 'POST',
+      headers: NOTION_HEADERS,
+      body: JSON.stringify({
+        parent: { database_id: NOTION_GUESTS_DB_ID },
+        properties
+      })
+    });
+    const createData = await createRes.json();
+    res.json({ status: 'created', id: createData.id });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to save profile' });
+  }
+});
+
+// ─── GET GUEST BY PHONE ───────────────────────────
+
+app.get('/api/guest', async (req, res) => {
+  const phone = req.query.phone;
+  if (!phone) return res.status(400).json({ error: 'phone required' });
+
+  try {
+    const guest = await findGuestByPhone(phone);
+    if (!guest) return res.json(null);
+
+    const props = guest.properties;
+    res.json({
+      name: props['Имя']?.title?.[0]?.plain_text || '',
+      phone: props['Телефон']?.phone_number || '',
+      birthday: props['Дата рождения']?.date?.start || null,
+      bookingsCount: props['Количество броней']?.number || 0,
+      history: props['История броней']?.rich_text?.[0]?.plain_text || ''
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch guest' });
+  }
+});
+
+// ─── СТАТУС ПОСЛЕДНЕЙ АКТИВНОЙ БРОНИ ───────────────
+
+app.get('/api/booking/status', async (req, res) => {
+  const phone = req.query.phone;
+  const checkKind = req.query.kind;
+  if (!phone) return res.status(400).json({ error: 'phone required' });
+
+  try {
+    const guest = await findGuestByPhone(phone);
+    if (!guest) return res.json({ status: 'none' });
+
+    const historyText = guest.properties['История броней']?.rich_text?.[0]?.plain_text || '';
+    const entries = historyText.split(',').map(s => s.trim()).filter(Boolean);
+
+    let latestActive = null;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e.includes('(отменено)')) continue;
+      const parsed = parseEntry(e);
+      if (isEntryExpired(parsed.iso)) continue;
+      if (checkKind && parsed.kind !== checkKind) continue;
+      latestActive = e;
+      break;
+    }
+
+    if (!latestActive) return res.json({ status: 'none' });
+
+    const raw = baseEntry(latestActive);
+    const display = displayEntry(raw);
+
+    if (latestActive.includes('(подтверждено)')) {
+      return res.json({ status: 'confirmed', entry: display, raw });
+    }
+    return res.json({ status: 'pending', entry: display, raw });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch status' });
+  }
+});
+
+// ─── ВСЕ АКТИВНЫЕ БРОНИ ГОСТЯ ──
+
+app.get('/api/booking/status-all', async (req, res) => {
+  const phone = req.query.phone;
+  if (!phone) return res.status(400).json({ error: 'phone required' });
+
+  try {
+    const guest = await findGuestByPhone(phone);
+    if (!guest) return res.json([]);
+
+    const historyText = guest.properties['История броней']?.rich_text?.[0]?.plain_text || '';
+    const entries = historyText.split(',').map(s => s.trim()).filter(Boolean);
+
+    const active = [];
+    for (const e of entries) {
+      if (e.includes('(отменено)')) continue;
+      const parsed = parseEntry(e);
+      if (isEntryExpired(parsed.iso)) continue;
+
+      const raw = baseEntry(e);
+      const display = displayEntry(raw);
+      const status = e.includes('(подтверждено)') ? 'confirmed' : 'pending';
+      active.push({ status, entry: display, raw, kind: parsed.kind });
+    }
+
+    const latestByKind = {};
+    for (const b of active) latestByKind[b.kind] = b;
+
+    res.json(Object.values(latestByKind));
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch statuses' });
+  }
+});
+
+// ─── ГОСТЬ ЗАДЕРЖИВАЕТСЯ ────────────────────────────
+
+app.post('/api/booking/late', async (req, res) => {
+  const { phone: rawPhone, entry } = req.body;
+  const phone = normalizePhone(rawPhone);
+
+  if (!phone || !entry) {
+    return res.status(400).json({ error: 'phone and entry required' });
+  }
+
+  try {
+    const guest = await findGuestByPhone(phone);
+    const guestName = guest?.properties?.['Имя']?.title?.[0]?.plain_text || 'Гость';
+
+    await sendTelegramMessage(
+      ADMIN_CHAT_ID,
+      `⏰ Гость опаздывает на 15 минут\n\n👤 ${guestName}\n📱 ${phone}\n🗓 ${displayEntry(entry)}`
+    );
+
+    res.json({ status: 'notified' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to notify' });
+  }
+});
+
+// ─── ADMIN: ВСЕ АКТИВНЫЕ БРОНИ ─────────────────────
+
+app.get('/api/admin/bookings', async (req, res) => {
+  try {
+    let allResults = [];
+    let cursor = undefined;
+    do {
+      const body = { page_size: 100 };
+      if (cursor) body.start_cursor = cursor;
+      const r = await fetchWithTimeout(`https://api.notion.com/v1/databases/${NOTION_GUESTS_DB_ID}/query`, {
+        method: 'POST',
+        headers: NOTION_HEADERS,
+        body: JSON.stringify(body)
+      });
+      const data = await r.json();
+      allResults = allResults.concat(data.results || []);
+      cursor = data.has_more ? data.next_cursor : undefined;
+    } while (cursor);
+
+    const bookings = [];
+    for (const page of allResults) {
+      const props = page.properties;
+      const name = props['Имя']?.title?.[0]?.plain_text || 'Гость';
+      const phone = props['Телефон']?.phone_number || '';
+      const history = props['История броней']?.rich_text?.[0]?.plain_text || '';
+      if (!history) continue;
+      const entries = history.split(',').map(s => s.trim()).filter(Boolean);
+      for (const entry of entries) {
+        if (entry.includes('(отменено)')) continue;
+        const { iso } = parseEntry(entry);
+        if (isEntryExpired(iso)) continue;
+        bookings.push({ name, phone, entry, display: displayEntry(entry) });
+      }
+    }
+
+    res.json(bookings);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch bookings' });
+  }
+});
+
+// ─── TELEGRAM WEBHOOK (бот "На Крыше") ────────────
+
+const WELCOME_TEXT =
+  'Бронь, меню и новости На Крыше.\n' +
+  'Нажимай кнопку «Открыть», чтобы найти всё, что нужно.\n\n' +
+  'Можно бронировать и голосовым, что особенно удобно, если находишься за рулём. ' +
+  'Просто назови дату, время и число гостей.\n' +
+  'Ты говоришь: «столик на завтра в девять вечера на четверых». ' +
+  'И ждёшь от нас сообщение с подтверждением.\n\n' +
+  'Текстом здесь лучше не писать, ответа не будет. ' +
+  'Хочешь связаться с командой? Заходи в приложение, через кнопку «Открыть».';
+
+const REVIEW_WELCOME_TEXT =
+  'Оставьте отзыв о вечере — пара минут, и мы станем лучше.\n' +
+  'Нажимайте кнопку «Открыть», чтобы пройти короткий опрос.';
+
+app.post('/telegram-webhook', async (req, res) => {
+  const update = req.body;
+
+  try {
+    if (update.message) {
+      const chatId = update.message.chat.id;
+      const text = update.message.text || '';
+
+      // Если ждём от админа новую дату/время после "Изменить" — это сообщение
+      // не приветствие, а ответ на запрос переноса брони. Разбираем его отдельно.
+      const pending = pendingEdits.get(String(chatId));
+      if (pending) {
+        const match = text.trim().match(/^(\d{1,2})\.(\d{1,2})\s+(\d{1,2}):(\d{2})$/);
+        if (!match) {
+          await sendTelegramMessage(chatId, 'Не разобрал формат. Пришлите так: ДД.ММ ЧЧ:ММ, например 25.08 21:30');
+          res.sendStatus(200);
+          return;
+        }
+
+        const [, dd, mm, hh, min] = match;
+        const now = new Date();
+        let year = now.getFullYear();
+        const candidateDate = new Date(year, Number(mm) - 1, Number(dd));
+        const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        if (candidateDate < todayMidnight) year += 1; // дата уже прошла в этом году — значит имелся в виду следующий
+        const newDateISO = `${year}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+        const newTime = `${String(hh).padStart(2, '0')}:${min}`;
+
+        const record = bookingsMap.get(pending.bookingId);
+        if (!record) {
+          await sendTelegramMessage(chatId, 'Информация об этой брони устарела, изменить не получится.');
+          pendingEdits.delete(String(chatId));
+          res.sendStatus(200);
+          return;
+        }
+
+        const result = await editBookingInternal(record.phone, record.entry, newDateISO, newTime);
+        if (!result.ok) {
+          await sendTelegramMessage(chatId, 'Не удалось найти гостя в базе, бронь не изменена.');
+          pendingEdits.delete(String(chatId));
+          res.sendStatus(200);
+          return;
+        }
+
+        // Если бронь уже была подтверждена раньше — гость думает что всё решено на старое время,
+        // значит это перенос, нужно явно сказать что время изменилось. А если ещё не была
+        // подтверждена (например админ созвонился и уточнил детали) — это по сути первое
+        // подтверждение, гостю нужно обычное "подтверждено", а не "перенесено".
+        const wasConfirmed = record.confirmed;
+        record.confirmed = true;
+        record.entry = result.newEntry; // дальше "Подтвердить/Отменить" должны работать уже с новой записью
+
+        await tgApi('editMessageText', {
+          chat_id: chatId,
+          message_id: pending.originalMessageId,
+          text: `📅 Бронь ${wasConfirmed ? 'изменена' : 'подтверждена'}\n\n👤 ${result.guestName}\n🗓 ${result.newDisplayText}\n\n${wasConfirmed ? '✏️ ПЕРЕНЕСЕНО' : '✅ ПОДТВЕРЖДЕНО'}`,
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '❌ Отменить', callback_data: `cancel_ask:${pending.bookingId}` },
+              { text: '✏️ Изменить снова', callback_data: `edit_ask:${pending.bookingId}` }
+            ]]
+          }
+        });
+
+        if (result.telegramId) {
+          const guestText = wasConfirmed
+            ? `Ваша бронь перенесена администратором.\n\n🗓 Новое время: ${result.newDisplayText}\n\nЖдём вас!`
+            : `🎉 Бронь подтверждена! Ждём вас.\n\n🗓 ${result.newDisplayText}`;
+          await sendTelegramMessage(result.telegramId, guestText);
+        }
+
+        await sendTelegramMessage(chatId, wasConfirmed ? '✅ Бронь перенесена, гость уведомлён.' : '✅ Бронь подтверждена, гость уведомлён.');
+        pendingEdits.delete(String(chatId));
+        res.sendStatus(200);
+        return;
+      }
+
+      // QR-код на столе ведёт на t.me/<bot>?start=review — Telegram присылает
+      // это как "/start review". Открываем мини-апп сразу на экране отзыва,
+      // внутри Telegram (без видимого URL в браузере), а не как обычную ссылку.
+      const isReviewStart = /^\/start\s+review\b/.test(text);
+
+      await sendTelegramMessage(chatId, isReviewStart ? REVIEW_WELCOME_TEXT : WELCOME_TEXT, {
+        inline_keyboard: [[
+          { text: 'Открыть', web_app: { url: isReviewStart ? `${WEBAPP_URL}?review=1` : WEBAPP_URL } }
+        ]]
+      });
+    }
+
+    if (update.callback_query) {
+      const cq = update.callback_query;
+      const [action, bookingId] = (cq.data || '').split(':');
+      const record = bookingsMap.get(bookingId);
+
+      if (!record) {
+        await tgApi('answerCallbackQuery', { callback_query_id: cq.id, text: 'Информация устарела', show_alert: false });
+      } else if (action === 'confirm') {
+        // Сразу отвечаем Telegram — кнопка перестаёт "крутиться" немедленно,
+        // а более медленная работа с Notion идёт уже после этого.
+        record.confirmed = true;
+        await tgApi('answerCallbackQuery', { callback_query_id: cq.id, text: '✅ Гостю отправлено подтверждение' });
+        await tgApi('editMessageText', {
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: `${cq.message.text}\n\n✅ ПОДТВЕРЖДЕНО`,
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '❌ Отменить', callback_data: `cancel_ask:${bookingId}` }
+            ], [
+              { text: '✏️ Изменить', callback_data: `edit_ask:${bookingId}` }
+            ]]
+          }
+        });
+        await confirmBookingInternal(record.phone, record.entry);
+        if (record.telegramId) {
+          await sendTelegramMessage(record.telegramId, `🎉 Бронь подтверждена! Ждём вас.\n\n🗓 ${displayEntry(record.entry)}`);
+        }
+      } else if (action === 'cancel_ask') {
+        await tgApi('answerCallbackQuery', { callback_query_id: cq.id, text: 'Нажмите ещё раз для подтверждения' });
+        await tgApi('editMessageReplyMarkup', {
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '⚠️ Да, отменить', callback_data: `cancel:${bookingId}` },
+              { text: '↩️ Назад', callback_data: `cancel_back:${bookingId}` }
+            ]]
+          }
+        });
+      } else if (action === 'cancel_back') {
+        await tgApi('answerCallbackQuery', { callback_query_id: cq.id, text: '' });
+        const restoredMarkup = record.confirmed
+          ? { inline_keyboard: [[{ text: '❌ Отменить', callback_data: `cancel_ask:${bookingId}` }], [{ text: '✏️ Изменить', callback_data: `edit_ask:${bookingId}` }]] }
+          : { inline_keyboard: [[
+              { text: '✅ Подтвердить', callback_data: `confirm:${bookingId}` },
+              { text: '❌ Отменить', callback_data: `cancel_ask:${bookingId}` }
+            ], [
+              { text: '✏️ Изменить', callback_data: `edit_ask:${bookingId}` }
+            ]] };
+        await tgApi('editMessageReplyMarkup', {
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          reply_markup: restoredMarkup
+        });
+      } else if (action === 'cancel') {
+        // Сразу отвечаем Telegram — так же, как и в "confirm"
+        await tgApi('answerCallbackQuery', { callback_query_id: cq.id, text: '❌ Бронь отменена, гость уведомлён' });
+        await tgApi('editMessageText', {
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: `${cq.message.text}\n\n❌ ОТМЕНЕНО`
+        });
+
+        const noSpotsMessage =
+          `К сожалению, свободных мест на это время уже не осталось — вечер собрал больше гостей, чем мы ожидали.\n\n` +
+          `Ваша бронь отменена, но Крыша никуда не денётся: выберите другое время, и мы позаботимся, чтобы вечер получился особенным.`;
+        const cancelMessage = record.confirmed ? null : noSpotsMessage;
+        await cancelBookingInternal(record.phone, record.entry, cancelMessage);
+        bookingsMap.delete(bookingId);
+      } else if (action === 'edit_ask') {
+        await tgApi('answerCallbackQuery', { callback_query_id: cq.id, text: '' });
+        const prompt = await tgApi('sendMessage', {
+          chat_id: cq.message.chat.id,
+          text: `Напишите новые дату и время для брони «${record.name}» в формате:\n\nДД.ММ ЧЧ:ММ\n\nНапример: 25.08 21:30`,
+          reply_markup: { force_reply: true }
+        });
+        pendingEdits.set(String(cq.message.chat.id), {
+          bookingId,
+          originalMessageId: cq.message.message_id,
+          promptMessageId: prompt?.result?.message_id
+        });
+      }
+    }
+  } catch (error) {
+    console.error('Webhook error:', error);
+  }
+
+  res.sendStatus(200);
 });
 
 app.get('/', (req, res) => {
-  res.send('Staff Proxy for На Крыше is running ✅');
+  res.send('Notion Proxy for На Крыше is running ✅');
 });
 
 app.listen(PORT, () => {
