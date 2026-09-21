@@ -490,14 +490,23 @@ async function confirmBookingUnlocked(phone, entry) {
   // запись, вместо того чтобы молча вернуть "успех", ничего не изменив (именно
   // это раньше маскировало гонку — Telegram-уведомление гостю уходило, даже
   // если запись, которую нужно было пометить, реально не совпала).
+  //
+  // ВАЖНО: если запись уже отменена ("(отменено)"), НЕ считаем её найденной —
+  // иначе confirm по "голому" тексту той же брони тихо стирает отметку об
+  // отмене и превращает её обратно в подтверждённую (гость при этом получит
+  // "бронь подтверждена" сразу после того как ему сказали, что она отменена).
+  // Такое возможно, если бронь отменили, а второй запрос на confirm (например
+  // с другого устройства или по старому списку) пришёл следом.
   let matched = false;
+  let alreadyCancelled = false;
   const updatedEntries = entries.map(e => {
     if (stripSuffix(e) !== entry) return e;
     matched = true;
+    if (e.includes(' (отменено)')) { alreadyCancelled = true; return e; }
     return e.includes(' (подтверждено)') ? e : `${stripSuffix(e)} (подтверждено)`;
   });
 
-  if (!matched) return { ok: false, notFound: true };
+  if (!matched || alreadyCancelled) return { ok: false, notFound: true };
 
   const newHistory = updatedEntries.join(', ');
 
@@ -549,14 +558,19 @@ async function editBookingUnlocked(phone, oldEntry, newDateISO, newTime, newGues
   // Стол при обычном редактировании (дата/время/гости/комментарий) не трогаем — сохраняем как был.
   const newEntry = `${newIsoDateTime}|${newDisplayText}|${parsed.kind}|${parsed.uid}|${guestsOut}|${commentOut}|${parsed.table || ''}`;
 
+  // Та же защита, что и в confirm: если запись уже отменена, перенос времени
+  // не должен тихо воскрешать её как подтверждённую (это поведение было и
+  // до фикса гонки — правлю заодно, раз уже здесь).
   let matched = false;
+  let alreadyCancelled = false;
   const updatedEntries = entries.map(e => {
     if (stripSuffix(e) !== oldEntry) return e;
     matched = true;
+    if (e.includes(' (отменено)')) { alreadyCancelled = true; return e; }
     return `${newEntry} (подтверждено)`;
   });
 
-  if (!matched) return { ok: false, notFound: true };
+  if (!matched || alreadyCancelled) return { ok: false, notFound: true };
 
   const newHistory = updatedEntries.join(', ');
 
