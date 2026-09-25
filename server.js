@@ -192,24 +192,36 @@ const REVIEW_CATEGORY_MAP = {
 // правит ту же базу, так что тут просто фильтр по галочке "В наличии".
 app.get('/api/menu', async (req, res) => {
   try {
-    const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_MENU_DB_ID}/query`, {
-      method: 'POST',
-      headers: NOTION_HEADERS,
-      body: JSON.stringify({
+    // Notion отдаёт максимум 100 позиций за запрос — догружаем остальные по курсору,
+    // иначе при меню больше 100 позиций хвост меню у гостей просто пропадал.
+    let pages = [];
+    let cursor;
+    do {
+      const body = {
         filter: { property: 'В наличии', checkbox: { equals: true } },
         sorts: [
           { property: 'Категория', direction: 'ascending' },
           { property: 'Подкатегория', direction: 'ascending' },
           { property: 'Порядок', direction: 'ascending' }
-        ]
-      })
-    });
-    const data = await r.json();
-    if (!r.ok) {
-      console.error('Notion menu query failed:', data);
-      return res.status(502).json({ error: 'Не удалось загрузить меню' });
-    }
-    const items = (data.results || []).map(p => {
+        ],
+        page_size: 100
+      };
+      if (cursor) body.start_cursor = cursor;
+      const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_MENU_DB_ID}/query`, {
+        method: 'POST',
+        headers: NOTION_HEADERS,
+        body: JSON.stringify(body)
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        console.error('Notion menu query failed:', data);
+        return res.status(502).json({ error: 'Не удалось загрузить меню' });
+      }
+      pages = pages.concat(data.results || []);
+      cursor = data.has_more ? data.next_cursor : undefined;
+    } while (cursor && pages.length < 2000);
+
+    const items = pages.map(p => {
       const props = p.properties;
       const file = props['Фото']?.files?.[0] || null;
       // Файл, загруженный прямо в Notion, отдаёт временную ссылку (~1 час) — это ок,
@@ -806,6 +818,163 @@ app.post('/api/internal/booking/table', async (req, res) => {
   }
 });
 
+// ─── ПРОСЬБА ОЦЕНИТЬ ВИЗИТ И РАССЫЛКИ (по команде стаф-бэкенда) ──
+// Стаф-бэкенд решает, КОМУ и КОГДА писать (сегменты, окно по времени, «не чаще раза
+// в 14 дней»), а пишет гостям этот бот — у гостя чат именно с ним.
+// «Без рассылок» — галочка в «Общей базе гостей»: гость нажал «Не присылать рассылки»
+// под сообщением или написал боту /stop. Таким гостям не пишем ни рассылки, ни просьбы
+// об отзыве. Колонку сервер создаёт сам, если её нет.
+const OPT_OUT_PROP = 'Без рассылок';
+let optOutColumnReady = false;
+async function ensureOptOutColumn() {
+  if (optOutColumnReady) return true;
+  try {
+    const r = await fetchWithTimeout(`https://api.notion.com/v1/databases/${NOTION_GUESTS_DB_ID}`, { headers: NOTION_HEADERS });
+    if (!r.ok) throw new Error(`read schema ${r.status}`);
+    const info = await r.json();
+    if (!info.properties?.[OPT_OUT_PROP]) {
+      const up = await fetchWithTimeout(`https://api.notion.com/v1/databases/${NOTION_GUESTS_DB_ID}`, {
+        method: 'PATCH',
+        headers: NOTION_HEADERS,
+        body: JSON.stringify({ properties: { [OPT_OUT_PROP]: { checkbox: {} } } })
+      });
+      if (!up.ok) throw new Error(`create column ${up.status}`);
+      console.log(`Создана колонка «${OPT_OUT_PROP}» в общей базе гостей`);
+    }
+    optOutColumnReady = true;
+    return true;
+  } catch (e) {
+    console.error(`Не удалось проверить/создать колонку «${OPT_OUT_PROP}»:`, e.message);
+    return false;
+  }
+}
+
+function guestTelegramId(page) {
+  return page?.properties?.['Telegram ID']?.rich_text?.[0]?.plain_text || '';
+}
+function guestOptedOut(page) {
+  return !!page?.properties?.[OPT_OUT_PROP]?.checkbox;
+}
+
+// Гость сам оставил отзыв за последние N дней (через QR на столе или раньше по просьбе)
+async function hasRecentReview(phone, days) {
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const r = await fetchWithTimeout(`https://api.notion.com/v1/databases/${NOTION_REVIEWS_DB_ID}/query`, {
+    method: 'POST',
+    headers: NOTION_HEADERS,
+    body: JSON.stringify({
+      filter: { and: [
+        { property: 'Телефон', phone_number: { equals: phone } },
+        { property: 'Дата', date: { on_or_after: since } }
+      ] },
+      page_size: 1
+    })
+  });
+  if (!r.ok) return false;
+  const data = await r.json();
+  return (data.results || []).length > 0;
+}
+
+// Отписка/подписка по Telegram ID — во всех строках общей базы с этим ID
+async function setOptOutByTelegramId(telegramId, optOut) {
+  await ensureOptOutColumn();
+  const r = await fetchWithTimeout(`https://api.notion.com/v1/databases/${NOTION_GUESTS_DB_ID}/query`, {
+    method: 'POST',
+    headers: NOTION_HEADERS,
+    body: JSON.stringify({ filter: { property: 'Telegram ID', rich_text: { equals: String(telegramId) } } })
+  });
+  if (!r.ok) return 0;
+  const data = await r.json();
+  let updated = 0;
+  for (const page of data.results || []) {
+    const up = await fetchWithTimeout(`https://api.notion.com/v1/pages/${page.id}`, {
+      method: 'PATCH',
+      headers: NOTION_HEADERS,
+      body: JSON.stringify({ properties: { [OPT_OUT_PROP]: { checkbox: !!optOut } } })
+    });
+    if (up.ok) updated++;
+  }
+  return updated;
+}
+
+const UNSUB_BUTTON = { text: '🔕 Не присылать рассылки', callback_data: 'unsub' };
+const RESUB_BUTTON = { text: '🔔 Снова получать новости', callback_data: 'resub' };
+
+app.post('/api/internal/review-request', async (req, res) => {
+  if (!checkInternalKey(req, res)) return;
+  const phone = normalizePhone(req.body?.phone);
+  const name = String(req.body?.name || '').trim().split(/\s+/)[0] || '';
+  if (!phone) return res.status(400).json({ error: 'phone required' });
+
+  try {
+    const guest = await findGuestByPhone(phone);
+    const telegramId = guestTelegramId(guest);
+    if (!telegramId) return res.json({ ok: true, sent: false, reason: 'no_telegram' });
+    if (guestOptedOut(guest)) return res.json({ ok: true, sent: false, reason: 'opted_out' });
+    if (await hasRecentReview(phone, 14)) return res.json({ ok: true, sent: false, reason: 'recent_review' });
+
+    const text =
+      `${name ? `${name}, спасибо` : 'Спасибо'}, что были у нас на Крыше!\n\n` +
+      `Как вам вечер? Оцените — это займёт минуту, а мы прочитаем каждый ответ и станем лучше.`;
+    const sent = await sendTelegramMessage(telegramId, text, {
+      inline_keyboard: [[{ text: '⭐ Оценить вечер', web_app: { url: `${WEBAPP_URL}?review=1` } }]]
+    });
+    if (sent && sent.ok) return res.json({ ok: true, sent: true });
+    res.json({ ok: true, sent: false, reason: sent && sent.error_code === 403 ? 'blocked' : 'failed' });
+  } catch (error) {
+    console.error('Review request failed:', error);
+    res.status(500).json({ error: 'Failed to send review request' });
+  }
+});
+
+// Рассылка: стаф-бэкенд присылает готовые сообщения пачками (до 50 за раз).
+// Под каждым — кнопка «Не присылать рассылки». Telegram разрешает боту ~30 сообщений
+// в секунду — шлём с паузой, на 429 ждём сколько попросят и повторяем один раз.
+app.post('/api/internal/broadcast', async (req, res) => {
+  if (!checkInternalKey(req, res)) return;
+  const messages = Array.isArray(req.body?.messages) ? req.body.messages : null;
+  if (!messages || !messages.length || messages.length > 50) return res.status(400).json({ error: 'messages: 1..50' });
+
+  let sent = 0, failed = 0, blocked = 0;
+  const results = [];
+  for (const m of messages) {
+    const chatId = String(m?.chatId || '');
+    const text = String(m?.text || '').slice(0, 4000);
+    if (!chatId || !text) { failed++; results.push({ chatId, ok: false }); continue; }
+    const markup = { inline_keyboard: [[UNSUB_BUTTON]] };
+    let r = await sendTelegramMessage(chatId, text, markup);
+    if (r && !r.ok && r.error_code === 429) {
+      const wait = Math.min(Number(r.parameters?.retry_after) || 1, 30);
+      await new Promise(resolve => setTimeout(resolve, wait * 1000));
+      r = await sendTelegramMessage(chatId, text, markup);
+    }
+    const ok = !!(r && r.ok);
+    const isBlocked = !!(r && !r.ok && r.error_code === 403);
+    if (ok) sent++; else { failed++; if (isBlocked) blocked++; }
+    results.push({ chatId, ok, blocked: isBlocked });
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  res.json({ ok: true, sent, failed, blocked, results });
+});
+
+async function handleSubscriptionCallback(cq) {
+  const unsubscribe = cq.data === 'unsub';
+  const updated = await setOptOutByTelegramId(cq.from?.id, unsubscribe);
+  await tgApi('answerCallbackQuery', {
+    callback_query_id: cq.id,
+    text: updated
+      ? (unsubscribe ? 'Готово — больше не будем присылать рассылки' : 'Готово — снова будем присылать новости')
+      : 'Не нашли вас в базе гостей — напишите нам, пожалуйста'
+  });
+  if (updated && cq.message) {
+    await tgApi('editMessageReplyMarkup', {
+      chat_id: cq.message.chat.id,
+      message_id: cq.message.message_id,
+      reply_markup: { inline_keyboard: [[unsubscribe ? RESUB_BUTTON : UNSUB_BUTTON]] }
+    });
+  }
+}
+
 // ─── BOOKING → GUESTS DB + УВЕДОМЛЕНИЯ ────────────
 
 app.post('/api/booking', async (req, res) => {
@@ -1255,6 +1424,16 @@ app.post('/telegram-webhook', async (req, res) => {
         return;
       }
 
+      // /stop — отписаться от рассылок (то же, что кнопка «Не присылать рассылки»)
+      if (/^\/(stop|unsubscribe)\b/i.test(text.trim())) {
+        const updated = await setOptOutByTelegramId(update.message.from?.id || chatId, true);
+        await sendTelegramMessage(chatId, updated
+          ? 'Готово — больше не будем присылать рассылки. Брони и ответы на них будут приходить как раньше.'
+          : 'Не нашли вас в базе гостей — рассылки вам и так не приходят.');
+        res.sendStatus(200);
+        return;
+      }
+
       // QR-код на столе ведёт на t.me/<bot>?start=review — Telegram присылает
       // это как "/start review". Открываем мини-апп сразу на экране отзыва,
       // внутри Telegram (без видимого URL в браузере), а не как обычную ссылку.
@@ -1272,7 +1451,9 @@ app.post('/telegram-webhook', async (req, res) => {
       const [action, bookingId] = (cq.data || '').split(':');
       const record = bookingsMap.get(bookingId);
 
-      if (!record) {
+      if (cq.data === 'unsub' || cq.data === 'resub') {
+        await handleSubscriptionCallback(cq);
+      } else if (!record) {
         await tgApi('answerCallbackQuery', { callback_query_id: cq.id, text: 'Информация устарела', show_alert: false });
       } else if (action === 'confirm') {
         // Сразу отвечаем Telegram — кнопка перестаёт "крутиться" немедленно,
@@ -1364,4 +1545,5 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  if (NOTION_TOKEN) ensureOptOutColumn();
 });
